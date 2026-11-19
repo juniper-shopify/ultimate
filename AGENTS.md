@@ -36,7 +36,7 @@ A project is a forest of conversation trees, like commit histories.
   `ultimate.search()`; commits name the conversation that made them (`Ultimate-Conversation` trailer).
 - **Talk across the tree without waking anyone.** `note` leaves context in another conversation for its next turn;
   `notify` tells you when another conversation finishes. Resuming a branch brings a catch-up of its tree's tally
-  (older updates collapse when needed), then new target commits, overlaps first.
+  (older updates collapse when needed), then the latest new target commits, newest first.
 - **State divergence.** Reports and `workspace submit` say how the result differs from the task as given: new
   agreements, a different approach or changed scope. Say "None" when it matches.
 - **Conclude** a conversation when its work is done; it stays readable and can be resumed. A branch whose submission
