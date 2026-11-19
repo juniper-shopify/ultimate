@@ -59,12 +59,12 @@ it('keeps initial and broadcast busy flags equal to the foreground-task scan', a
     expect(lists).toEqual([expected()])
     graph = { tasks: { 12: makeTask(12, 2, false) } }
     advance({ kind: 'value', value: graph })
-    await vi.advanceTimersByTimeAsync(100)
+    await vi.runAllTimersAsync()
     expect(lists).toHaveLength(2)
     expect(lists.at(-1)).toEqual(expected())
     graph = { tasks: {} }
     advance({ kind: 'value', value: graph })
-    await vi.advanceTimersByTimeAsync(100)
+    await vi.runAllTimersAsync()
     expect(lists.at(-1)).toEqual(expected())
   } finally {
     await api.close()
