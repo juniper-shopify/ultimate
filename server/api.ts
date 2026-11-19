@@ -179,20 +179,20 @@ export async function createApi(
   const streams = new Set<() => Promise<void>>()
   const connections = new Map<string, Connection>()
   let onGraph: (ops: readonly Op[]) => void = () => {}
-  const latestCommitGraph: { tasks?: TaskGraph } = {}
+  const latestCommitGraph: { tasks?: () => TaskGraph } = {}
   const graph = await harness.observeTaskGraph(
     {
       advance: (call) => {
         if (call.kind !== 'value') return
-        latestCommitGraph.tasks = call.value
+        latestCommitGraph.tasks = () => call.value
         onGraph(call.ops)
       },
       end: () => {},
     },
     context,
   )
-  latestCommitGraph.tasks ??= graph.value
-  const tasks = () => latestCommitGraph.tasks!
+  latestCommitGraph.tasks ??= () => graph.value
+  const tasks = () => latestCommitGraph.tasks!()
   let closed = false
   let summaries: ConversationSummary[] = []
   const projectIndex = conversationIndex(host.home)
