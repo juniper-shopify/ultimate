@@ -81,6 +81,11 @@ export function fakeSubscriptions(sources: FakeSource[]) {
       >
       const status = refusals.get(spec.conversation)
       if (status) return Response.json({ error: 'Refused' }, { status })
+      const existing = subscriptions.find((item) => item.stream === stream && item.sub === sub)
+      if (existing) {
+        Object.assign(existing, spec)
+        return Response.json({ ok: true })
+      }
       const source = sources.find((item) => item.id === stream)!
       subscriptions.push({
         stream,
