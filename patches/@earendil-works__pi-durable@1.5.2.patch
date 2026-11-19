@@ -341,6 +341,138 @@ index 512b2477c29b83c03a1c239ee427d928ce553caa..b86d5ac98c07f3af2ff5b64ebe987c6e
      const entry = await appendInput(tx, conversationId, draft.content, draft.entry, now);
      const input = { ...fields, type: "input", status: "placed", entry: entry.id };
      const { id } = await tx.createSubmission(input);
+diff --git a/dist/harness/task-graph.js b/dist/harness/task-graph.js
+index a8d2b7d9061112887dbdf17c871ef5d18b80c4d2..6ccb7a83d9c8fc87ba856dc1175c481ad9ce0f50 100644
+--- a/dist/harness/task-graph.js
++++ b/dist/harness/task-graph.js
+@@ -6,6 +6,29 @@ import { blockedSubject } from "./scheduler.js";
+ import { closedError, scanAll } from "./util.js";
+ const LIVE_STATUSES = ["pending", "running", "waiting", "sleeping", "completing"];
+ const SCAN_PAGE_SIZE = 256;
++const TASK_BUCKETS = 64;
++function bucketOf(key) {
++    return String(Number(key) % TASK_BUCKETS);
++}
++function nodeAt(mount, key) {
++    const revision = mount.revision;
++    return revision.buckets === undefined ? revision.value.tasks[key] : revision.buckets[bucketOf(key)][key]?.node;
++}
++function index(value) {
++    const buckets = Object.fromEntries(Array.from({ length: TASK_BUCKETS }, (_, key) => [String(key), {}]));
++    let nextOrder = 0;
++    for (const [key, node] of Object.entries(value.tasks))
++        buckets[bucketOf(key)][key] = { node, order: nextOrder++ };
++    return { buckets, nextOrder };
++}
++function snapshot(revision) {
++    if (revision.value === undefined) {
++        const entries = Object.values(revision.buckets).flatMap(Object.entries);
++        entries.sort((a, b) => a[1].order - b[1].order);
++        revision.value = { tasks: Object.fromEntries(entries.map(([key, entry]) => [key, entry.node])) };
++    }
++    return revision.value;
++}
+ /**
+  * The Harness's task graph mount: built on the Session line by its first observer and dropped with its last. It
+  * advances from the Session's commit publications, which are durable.
+@@ -69,13 +92,16 @@ export class TaskGraphView {
+             const mount = this.#mount ?? {
+                 ...(await this.#build(storage, context)),
+                 observers: new Set(),
++                readers: new WeakSet(),
+             };
+             const detach = () => {
+                 mount.observers.delete(observer);
+                 if (mount.observers.size === 0 && this.#mount === mount)
+                     this.#mount = undefined;
+             };
+-            const observer = create(mount.value, detach);
++            const observer = create(snapshot(mount.revision), detach);
++            if (observer instanceof Watch)
++                mount.readers.add(observer);
+             // Close or cancellation may begin while the mount builds; register nothing then.
+             if (this.#closed)
+                 throw closedError(this.#session);
+@@ -97,7 +123,7 @@ export class TaskGraphView {
+             const ops = [];
+             for (const [key, record] of mount.records) {
+                 const blocked = this.#blocking.blocked(record);
+-                if (blocked === mount.value.tasks[key]?.blocked)
++                if (blocked === nodeAt(mount, key)?.blocked)
+                     continue;
+                 ops.push(blocked === undefined ? ["d", ["tasks", key, "blocked"]] : ["s", ["tasks", key, "blocked"], blocked]);
+             }
+@@ -122,7 +148,7 @@ export class TaskGraphView {
+             tasks[String(record.id)] = nodeOf(record, conversations, this.#blocking.blocked(subject));
+             live.set(String(record.id), subject);
+         }
+-        return { value: { tasks }, records: live };
++        return { revision: { value: { tasks } }, records: live };
+     }
+ }
+ /**
+@@ -133,7 +159,7 @@ function advance(mount, publication, context, blocked, report) {
+     const ops = [];
+     // Nodes this publication set or deleted, over the mount's value.
+     const changed = new Map();
+-    const node = (key) => changed.has(key) ? changed.get(key) : mount.value.tasks[key];
++    const node = (key) => changed.has(key) ? changed.get(key) : nodeAt(mount, key);
+     for (const change of publication.changes) {
+         if (change.type !== "task")
+             continue;
+@@ -176,11 +202,49 @@ function advance(mount, publication, context, blocked, report) {
+ function publish(mount, ops, context, report) {
+     if (ops.length === 0)
+         return;
+-    mount.value = applyImmutable(mount.value, ops);
++    const observers = [...mount.observers];
++    const readers = mount.readers;
++    let revision;
++    if (observers.some((observer) => readers.has(observer))) {
++        const value = applyImmutable(snapshot(mount.revision), ops);
++        mount.revision = { value };
++        const frameContext = withoutAbortSignal(context);
++        const call = { kind: "value", value, ops, retired: false };
++        for (const observer of observers)
++            contained(() => observer.advance(call, frameContext), report);
++        return;
++    }
++    else {
++        const previous = mount.revision;
++        if (previous.buckets === undefined)
++            Object.assign(previous, index(previous.value));
++        let nextOrder = previous.nextOrder;
++        const orders = new Map();
++        const changes = ops.map(([kind, path, ...args]) => {
++            const key = path[1];
++            const bucket = bucketOf(key);
++            if (path.length === 2) {
++                if (kind === "d") {
++                    orders.set(key, undefined);
++                    return [kind, [bucket, key]];
++                }
++                const order = (orders.has(key) ? orders.get(key) : previous.buckets[bucket][key]?.order) ?? nextOrder++;
++                orders.set(key, order);
++                return [kind, [bucket, key], { node: args[0], order }];
++            }
++            return [kind, [bucket, key, "node", ...path.slice(2)], ...args];
++        });
++        revision = { buckets: applyImmutable(previous.buckets, changes), nextOrder };
++    }
++    mount.revision = revision;
+     const frameContext = withoutAbortSignal(context);
+-    const call = { kind: "value", value: mount.value, ops, retired: false };
+-    for (const observer of [...mount.observers])
++    let delivering;
++    const call = { kind: "value", get value() { if (delivering !== undefined) readers.add(delivering); return snapshot(revision); }, ops, retired: false };
++    for (const observer of observers) {
++        delivering = observer;
+         contained(() => observer.advance(call, frameContext), report);
++    }
++    delivering = undefined;
+ }
+ function nodeOf(record, conversations, blocked) {
+     return {
 diff --git a/dist/harness/types.d.ts b/dist/harness/types.d.ts
 index 7f4a0ba59df6d5870248c60c055dd188fdab51c4..37bcd2196d762f1c8c8e8e43ff1ec66ec525e5aa 100644
 --- a/dist/harness/types.d.ts
