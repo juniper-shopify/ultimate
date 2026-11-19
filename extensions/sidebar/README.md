@@ -93,6 +93,9 @@ and the time of its latest message (`now`, `5m`, `3h`, `2d`,
 then a date). Its leading mark pulses while it or any of its subagents works, and is solid when an answer arrived
 since you last looked at it. Actual foreground tasks and live run boundaries determine Working, not the potentially
 lagging title/timestamp list.
+Plain rows retain their rendered content while their conversation and display facts are unchanged; unrelated status
+updates, insertions and reorders do not rebuild those rows. Selection, clock and relevant provider changes still refresh
+them. Non-branch rows do not mount starter-document hooks.
 A solid purple dot means an unread reply, not ongoing work; only the pulsing dot means working.
 
 Every row reads one state from messages’ `conversationState`, the same the System surface shows: working;
