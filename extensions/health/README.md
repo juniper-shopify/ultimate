@@ -44,6 +44,14 @@ Every machine keeps its own logins: never copy `auth.json` between machines. OAu
 
 A `GenerationTask` `afterResponse` hook records every terminal provider message at no cost: `stopReason: 'error'` records a failure with `errorMessage`, `aborted` nothing, anything else a success. The write never blocks or fails the generation.
 
+Failures, state changes and recoveries from an active error are written immediately. Otherwise, successful samples
+are coalesced to one write per provider every five seconds: only `lastOk` and `lastUsed` can lag. Five seconds bounds
+that timestamp lag while avoiding a synced rewrite on each response. A timer flushes the trailing sample even if no
+more responses arrive, and closing or reloading the extension flushes pending samples. Login changes discard that
+provider's pending samples before resetting it. A crash can lose at most the pending interval of success timestamps;
+failures are not throttled. The existing cross-process read/merge/write race remains: a delayed success can also make
+another process's older, out-of-order failure visible until the success is flushed.
+
 ## Status line
 
 In every home the `setup` status-line item lists a failing provider with its error (`providers()`).

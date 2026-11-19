@@ -3,7 +3,7 @@ import { defineExtension, GenerationTask, hook } from '@earendil-works/pi-durabl
 import type { ExtensionHost } from '../../server/extensions.ts'
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context'
 import { inProcess } from '../../lib/errors.ts'
-import { readHealth, record, reset } from './store.ts'
+import { healthRecorder, readHealth } from './store.ts'
 import { HealthApi } from './api.ts'
 import { LoginChanged } from '../models/api.ts'
 import type { Flip, HealthEntry } from './store.ts'
@@ -37,19 +37,12 @@ export async function announce(host: Pick<ExtensionHost, 'harness' | 'emit'>, fl
     .catch((error: unknown) => console.error('health: announcing a change failed:', error))
 }
 
-export async function recordHealth(
-  userHome: string,
-  provider: string,
-  entry: HealthEntry,
-  announceHealthFlip: (flips: Flip[]) => Promise<void> = async () => {},
-) {
-  await announceHealthFlip([await record(userHome, provider, entry)])
-}
-
 export default function health(host: ExtensionHost) {
   const announceHealthFlip = (flips: Flip[]) => announce(host, flips)
+  const recorder = healthRecorder(host.userHome, announceHealthFlip)
+  host.onClose(recorder.close)
   host.react('login-changed', [LoginChanged], async (tx, { data }) => {
-    for (const { provider, from, to } of await reset(host.userHome, [data.provider]))
+    for (const { provider, from, to } of await recorder.reset([data.provider]))
       if (from !== to) await host.emit(tx, Changed, { provider, state: to })
   })
   host.implement(HealthApi, {
@@ -67,12 +60,9 @@ export default function health(host: ExtensionHost) {
           if (!entry) return
           const hasLocalLogin = host.modelRuntime.getProviderAuthStatus(message.provider).configured
           if (!hasLocalLogin) return
-          const advisoryWrite = recordHealth(
-            host.userHome,
-            message.provider,
-            entry,
-            announceHealthFlip,
-          )
+          const advisoryWrite = recorder
+            .record(message.provider, entry)
+            .then((flip) => announceHealthFlip([flip]))
           inProcess(
             'a health sample is advisory: the next response to the same provider records its state',
             advisoryWrite.catch((error: unknown) => {
