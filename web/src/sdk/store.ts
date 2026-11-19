@@ -118,6 +118,7 @@ export function createStore(options: StoreOptions = {}) {
   }
   const listeners = new Set<() => void>()
   const docKinds = new Map<string, number>()
+  let mainDocKinds = new Set<string>()
 
   const docWatchCountsByConversation = new Map<ConversationId, Map<string, number>>()
   const watchedViews = new Map<ConversationId, number>()
@@ -206,7 +207,7 @@ export function createStore(options: StoreOptions = {}) {
       case 'doc':
       case 'docOps': {
         const event = data as ServerEvents['doc'] | ServerEvents['docOps']
-        if (!docKinds.has(event.kind)) break
+        if (!mainDocKinds.has(event.kind)) break
         const docs = applyDoc(state.docs, event)
         if (docs !== state.docs) set({ docs })
         break
@@ -281,25 +282,45 @@ export function createStore(options: StoreOptions = {}) {
   }
 
   function openMain() {
-    cancelResubscribe?.()
     unsubscribe(main)
-    const requested = state.requested
+    main = undefined
+    syncMain()
+  }
+  function syncMain() {
+    cancelResubscribe?.()
+    mainDocKinds = new Set(docKinds.keys())
+    if (Object.keys(state.docs).some((kind) => !mainDocKinds.has(kind)))
+      set({
+        docs: Object.fromEntries(
+          Object.entries(state.docs).filter(([kind]) => mainDocKinds.has(kind)),
+        ),
+      })
+    const spec = {
+      conversation: state.requested,
+      docs: [...mainDocKinds].toSorted(),
+      view: true,
+    }
+    if (main !== undefined) {
+      updateSubscription(main, spec, retryMain)
+      return
+    }
     main = subscribe(
-      { conversation: requested, docs: [...docKinds.keys()].toSorted(), view: true },
+      spec,
       (name, raw) =>
         name === 'view' ? replaceViewFromFreshSnapshot(raw) : handle(name, JSON.parse(raw)),
-      (status) => {
-        if (status === STREAM_GONE_RECONNECT_RESUBSCRIBES) return
-
-        const requestedConversationNeverOpened =
-          status === 404 && requested !== undefined && !state.view
-        if (requestedConversationNeverOpened) {
-          set({ requested: undefined })
-          options.onFallback?.()
-          openMain()
-        } else cancelResubscribe = retryAfter(options.retryMs ?? 1000, openMain)
-      },
+      retryMain,
     )
+  }
+  function retryMain(status: number) {
+    if (status === STREAM_GONE_RECONNECT_RESUBSCRIBES) return
+    cancelResubscribe?.()
+    const requestedConversationNeverOpened =
+      status === 404 && state.requested !== undefined && !state.view
+    if (requestedConversationNeverOpened) {
+      set({ requested: undefined })
+      options.onFallback?.()
+      openMain()
+    } else cancelResubscribe = retryAfter(options.retryMs ?? 1000, openMain)
   }
 
   function connect() {
@@ -352,7 +373,7 @@ export function createStore(options: StoreOptions = {}) {
   function scheduleMain() {
     if (stopped) return
     cancelResubscribe?.()
-    cancelResubscribe = nextTurn(openMain)
+    cancelResubscribe = nextTurn(syncMain)
   }
 
   function openDocs(conversation: ConversationId, kinds: string, withView: boolean) {
@@ -507,8 +528,7 @@ export function createStore(options: StoreOptions = {}) {
         if (left > 0) docKinds.set(kind, left)
         else {
           docKinds.delete(kind)
-          const { [kind]: _removed, ...docs } = state.docs
-          set({ docs })
+          scheduleMain()
         }
       }
     },
