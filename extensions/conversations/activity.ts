@@ -106,29 +106,23 @@ export function activityBehavior(
     closed = false
     checkpointsReady = false
     stop = onCommit(host.harness(), (publication) => {
-      let candidates: Map<ConversationId, EntryRecord | undefined> | undefined
-      let full: Set<ConversationId> | undefined
+      const candidates = new Map<ConversationId, EntryRecord | undefined>()
+      const full = new Set<ConversationId>()
       for (const change of publication.changes) {
-        if (change.type === 'conversation') (full ??= new Set()).add(change.value.id)
+        if (change.type === 'conversation') full.add(change.value.id)
         if (change.type !== 'entry') continue
         const entry = change.value
-        if (isInput(entry) || entry.head !== undefined)
-          (full ??= new Set()).add(entry.conversationId)
+        if (isInput(entry) || entry.head !== undefined) full.add(entry.conversationId)
         if (entry.model?.[0]?.role !== 'assistant') continue
         if (entry.kind !== 'pi.assistant' || typeof entry.model[0].timestamp !== 'number')
-          (full ??= new Set()).add(entry.conversationId)
-        candidates ??= new Map()
+          full.add(entry.conversationId)
         const previous = candidates.get(entry.conversationId)
         if (!previous || entry.id > previous.id) candidates.set(entry.conversationId, entry)
       }
-      if (full) {
-        candidates ??= new Map()
-        for (const id of full) {
-          dirty.add(id)
-          candidates.set(id, undefined)
-        }
+      for (const id of full) {
+        dirty.add(id)
+        candidates.set(id, undefined)
       }
-      if (!candidates) return
       for (const [id, assistant] of candidates) {
         if (pending.has(id) && pending.get(id) === undefined) continue
         const previous = pending.get(id)

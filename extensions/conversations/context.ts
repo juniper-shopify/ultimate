@@ -146,21 +146,20 @@ export function contextBehavior(
     closed = false
     stop?.()
     stop = onCommit(host.harness(), (publication) => {
-      let ids: Set<ConversationId> | undefined
+      const ids = new Set<ConversationId>()
       for (const change of publication.changes) {
         if (
           change.type === 'entry' &&
           ['pi.assistant', 'pi.compaction', 'pi.reset'].includes(change.value.kind)
         )
-          (ids ??= new Set()).add(change.value.conversationId)
+          ids.add(change.value.conversationId)
         if (
           change.type === 'document' &&
           change.conversationId !== undefined &&
           change.record.kind === AgentDoc.definition.kind
         )
-          (ids ??= new Set()).add(change.conversationId)
+          ids.add(change.conversationId)
       }
-      if (!ids) return
       for (const id of ids) {
         let assistant: EntryRecord | undefined
         let full = false

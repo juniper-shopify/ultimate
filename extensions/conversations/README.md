@@ -54,8 +54,7 @@ history, and only commits metadata when the derived fields change.
 reconciliation, a publication of LiveDoc, InboxDoc or Summaries is skipped when that document's own projected value
 (run presence, queued-input presence or the five summary fields) is unchanged. Pending or failed reconciliation,
 a copied source document, or a changed index row clears that conversation's knowledge; replacing the entire index
-clears all of it. The original triggers still repair from records. Activity and context retain separate transactions
-and failure/retry paths; unrelated publications allocate no candidate collections.
+clears all of it. The original triggers still repair from records.
 
 All input detection uses `isInput` in `lib/entries.ts`: Pi Durable marks entries placed from input
 submissions with `input: true` (a small upstream patch). Pi's own `pi.user` input kind also counts,
