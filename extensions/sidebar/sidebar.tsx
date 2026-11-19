@@ -61,6 +61,7 @@ import { StandingPhase, WaitingOnUser } from './ultimate.tsx'
 import { useShell, useSidebarState } from './state.tsx'
 import { topLevelRows } from './listed.ts'
 import { UnderUltimate, Unlisted } from './ui.tsx'
+import { SubagentWindow } from './subagent-window.tsx'
 
 const useShownId = () => useStore((state) => state.view?.conversation.id ?? state.requested)
 
@@ -481,16 +482,20 @@ function Tree({
       </div>
     )
   }
-  const subagentLines = (id: number, depth = 0): ReactNode[] =>
+  const subagentLines = (id: number, depth = 0): { id: number; content: ReactNode }[] =>
     (childrenByParent.get(id) ?? []).flatMap((child) => [
-      <SubagentLine
-        conversation={child}
-        depth={depth}
-        key={child.id}
-        parked={parked.has(child.id)}
-        row={overview[child.id]}
-        shown={shownId === child.id}
-      />,
+      {
+        id: child.id,
+        content: (
+          <SubagentLine
+            conversation={child}
+            depth={depth}
+            parked={parked.has(child.id)}
+            row={overview[child.id]}
+            shown={shownId === child.id}
+          />
+        ),
+      },
       ...subagentLines(child.id, depth + 1),
     ])
   const flights: Flight[] = openBranches.map((branch) => ({
@@ -499,7 +504,9 @@ function Tree({
     parked: parked.has(branch.id),
     subagents: [
       <EpicLine id={branch.id} key="epic" working={working.get(branch.id) === 'self'} />,
-      ...subagentLines(branch.id),
+      childrenByParent.has(branch.id) && (
+        <SubagentWindow key="subagents" rows={subagentLines(branch.id)} shownId={shownId} />
+      ),
     ],
   }))
 
