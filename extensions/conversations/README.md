@@ -30,7 +30,13 @@ source assistant or head entry. A fork starts at `{ at: 0 }`, without inheriting
 A watcher follows Pi's commits and writes the document in its own commit, serially per conversation, only when it
 changes. Plain assistant commits supply usage and activity timestamps directly; mixed or structural changes keep
 full-context reconciliation. On open, background reconciliation scans bounded pages and recovers missing or stale source entries without
-blocking startup. The status line reads this same document, independent of which browser is open.
+blocking startup. Both reactors save private, fork-initial checkpoints with the newest visible entry and projected
+fields, including on the assistant fast path. Matching checkpoints skip the full read on subsequent opens; context
+also checks the resolved model window. Missing checkpoints or changed entries/documents keep full repair, including
+commits missed while closed. Activity does not advance a checkpoint through a pending or failed full reconciliation.
+The first open after upgrading still reconciles everything.
+Any change to either projection's derivation must bump the checkpoint projection version in `backfill.ts`.
+The status line reads this same document, independent of which browser is open.
 
 `compactions.ts` emits `conversations.compacted` `{ conversation, entry, reason? }` (`Compacted` in `refs.ts`) for
 each compaction summary Pi places. Pi appends it in its compaction task with no hook in that commit, so a commit
@@ -41,8 +47,8 @@ ends the run waiting on it, which reports itself.
 `activity.ts` maintains `ultimate.metadata`'s `inputTitle`, `inputAt`, and `answerAt` from committed
 history; core only serves those fields, preferring an explicit `title` over the input title. Reset and
 compaction cut the active title source but preserve activity times from earlier history. On open, the
-projection reconciles every conversation, including inherited fork history, and only commits metadata
-when the derived fields change.
+projection checks every conversation, reconciling those without a current checkpoint, including inherited fork
+history, and only commits metadata when the derived fields change.
 
 All input detection uses `isInput` in `lib/entries.ts`: Pi Durable marks entries placed from input
 submissions with `input: true` (a small upstream patch). Pi's own `pi.user` input kind also counts,
