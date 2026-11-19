@@ -74,15 +74,21 @@ function Open({ timers }: { timers: WaitFacts['automations'] }) {
   const id = useConversation((conversation) => conversation.id)
   const log = useDocOf(ROOT, MessagesDoc) ?? emptyMessages
   const concludedSince = useConcludedSince()
-  const starters = useStarters()
   const conversations = useConversations()
+  const starters = useStarters(
+    conversations
+      .filter(
+        (conversation) => conversation.branchOf && concludedSince(conversation.id) !== Infinity,
+      )
+      .map((conversation) => conversation.id),
+  )
   const underway = useUnderway()
   const branches = conversations
     .filter((c) => c.branchOf)
     .map((c) => ({
       id: c.id,
       title: c.title,
-      starter: starters(c.id),
+      starter: starters(c.id) ?? undefined,
       working: underway(c.id),
       concluded: concludedSince(c.id) === Infinity,
     }))

@@ -39,7 +39,7 @@ type Conversation = {
   busy?: boolean
   parked?: boolean
   concludedSince?: number
-  starter?: number
+  starter?: number | null
 }
 
 export function conversationWait(
@@ -47,16 +47,22 @@ export function conversationWait(
   log: MessagesData,
   automations?: WaitFacts['automations'],
 ) {
-  return waitsOn(conversation.id, {
+  const wait = waitsOn(conversation.id, {
     working:
       conversation.busy ||
       conversation.runState === 'working' ||
       conversation.runState === 'queued',
     messages: log.messages,
     automations,
-    starter: conversation.starter,
+    starter: conversation.starter ?? undefined,
     concluded: conversation.concludedSince === Infinity,
   })
+  return (
+    wait ??
+    (conversation.starter === null && conversation.concludedSince !== Infinity
+      ? { on: 'loading' as const }
+      : undefined)
+  )
 }
 
 export function conversationState(
@@ -93,6 +99,8 @@ export function waitLabel(
         ? ` · ${remote.progress.label} ${remote.progress.index}/${remote.progress.total}`
         : ''
   switch (wait.on) {
+    case 'loading':
+      return 'loading…'
     case 'work':
       return 'working'
     case 'user':
