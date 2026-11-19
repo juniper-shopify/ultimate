@@ -12,6 +12,8 @@ refuses a folder with files, whose first commit is a judgement for an agent; onb
 
 Each conversation has one record in the root `ultimate.workspaces` document.
 Its path is `<home>/worktrees/<conversationId>`; its branch includes the home hash and conversation ID.
+Browser readers use `useWorkspaces()` for items or `useWorkspace(id)` for one item; queue and result changes do not
+invalidate those selections. `useWorkspaceIndex()` still follows the whole document for readers that need it.
 Where checkouts live and how they are made can be configured in the project's settings, for repositories whose
 tooling owns worktrees: company-internal monorepo tooling that must create and register each tree, a Git setup that
 refuses worktrees outside one folder, or a team that keeps every tree in one place. All three keys are optional:
