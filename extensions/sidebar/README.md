@@ -90,7 +90,8 @@ subagents is shown. Each row has its title (or `#id` for shared rows, `Untitled 
 and the time of its latest message (`now`, `5m`, `3h`, `2d`,
 then a date). Its leading mark pulses while it or any of its subagents works, and is solid when an answer arrived
 since you last looked at it. Actual foreground tasks and live run boundaries determine Working, not the potentially
-lagging title/timestamp list.
+lagging title/timestamp list. The sidebar indexes parent and branch edges per input revision; owned subagents,
+branch ordering and concluded propagation keep their separate ancestry rules.
 A solid purple dot means an unread reply, not ongoing work; only the pulsing dot means working.
 
 Every row reads one state from messages’ `conversationState`, the same the System surface shows: working;
