@@ -41,3 +41,9 @@ first event, `stream`, carries the id with which `POST /api/events/<stream>/<sub
 subscribes to a conversation and `DELETE` ends that (`ServerEvents` in `shared/protocol.ts`). A subscription's
 `view`, `ops`, `doc` and `docOps` events carry its id on their first data line, so their `data` reads `<sub>\n{…}`:
 parse what follows the first newline.
+
+The global task graph follows the same snapshot/ops pattern without a subscription id: `tasks` sends the last
+published graph once per connection, then `tasksOps` carries `{ ops }` folded over each broadcast window. A connection
+opened during a window starts from that published baseline, not the newer graph those pending ops already include.
+The browser applies ops immutably; reconnecting replaces its graph from a fresh snapshot before applying further ops.
+An overflowing pending-ops queue sends a root replacement in `tasksOps`, as document operations can.
