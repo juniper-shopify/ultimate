@@ -1,0 +1,101 @@
+diff --git a/dist/api/openai-responses-shared.js b/dist/api/openai-responses-shared.js
+index 3901bfc4bc6dee0eb45a209dbcbdb59d6c55d054..7e137146c8083b80c20342b966d78a2eb33d4c1b 100644
+--- a/dist/api/openai-responses-shared.js
++++ b/dist/api/openai-responses-shared.js
+@@ -88,6 +88,27 @@ function renderIncrementalToolsNotice(unavailable) {
+ function renderToolRemovalNotice(names) {
+     return `The following tools are no longer available. Do not call them:\n${names.map((name) => `- ${name}`).join("\n")}`;
+ }
++const responseMessageCache = new WeakMap();
++const deeplyFrozen = new WeakSet();
++function isDeeplyFrozen(value) {
++    if (value === null || typeof value !== "object" || deeplyFrozen.has(value))
++        return true;
++    if (!Object.isFrozen(value) || !Object.values(value).every(isDeeplyFrozen))
++        return false;
++    deeplyFrozen.add(value);
++    return true;
++}
++function copyResponseItem(value) {
++    if (Array.isArray(value))
++        return value.map(copyResponseItem);
++    if (value !== null && typeof value === "object") {
++        const copy = { ...value };
++        for (const key of Object.keys(copy))
++            copy[key] = copyResponseItem(copy[key]);
++        return copy;
++    }
++    return value;
++}
+ export function convertResponsesMessages(model, context, allowedToolCallProviders, options) {
+     const normalizedContext = resolveTranscript(context, options?.supportsMidConvoSystemMessages);
+     const messages = [];
+@@ -115,7 +136,13 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+         }
+         return `${normalizedCallId}|${normalizedItemId}`;
+     };
+-    const transformedMessages = transformMessages(normalizedContext.messages, model, normalizeToolCallId);
++    const sources = new WeakMap();
++    const transformedMessages = transformMessages(normalizedContext.messages, model, normalizeToolCallId, sources);
++    const cacheKey = JSON.stringify([
++        model.provider, model.api, model.id, model.input.includes("image"),
++        allowedToolCallProviders.has(model.provider), options?.configurationUpdateEffort !== undefined,
++        [...(options?.grammarToolInputProperties ?? [])],
++    ]);
+     const toolSupport = getResponsesToolSupport(options ?? {});
+     const transcriptTools = resolveTranscriptTools(normalizedContext.messages, toolSupport);
+     let declaredAdditionalTools = false;
+@@ -172,6 +199,16 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+     let systemIndex = 0;
+     for (const msg of transformedMessages) {
+         const isLeadingSystemMessage = sourceIndex++ === 0 && msg.role === "system";
++        const source = sources.get(msg);
++        const cacheable = msg.role !== "system" && source !== undefined && isDeeplyFrozen(source);
++        const cached = cacheable ? responseMessageCache.get(source) : undefined;
++        if (cached?.key === cacheKey && cached.index === msgIndex && cached.toolCallId === msg.toolCallId) {
++            for (const item of cached.items)
++                messages.push(copyResponseItem(item));
++            msgIndex++;
++            continue;
++        }
++        const start = messages.length;
+         if (msg.role === "system") {
+             // transformMessages keeps system messages in order, so their position matches the transcript.
+             const anchorsToolChanges = systemIndex++ >= transcriptTools.foldedSystemMessages;
+@@ -324,6 +361,12 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+                 });
+             }
+         }
++        if (cacheable) {
++            const items = messages.slice(start);
++            responseMessageCache.set(source, { key: cacheKey, index: msgIndex, toolCallId: msg.toolCallId, items });
++            for (let index = start; index < messages.length; index++)
++                messages[index] = copyResponseItem(messages[index]);
++        }
+         if (!isLeadingSystemMessage)
+             msgIndex++;
+     }
+diff --git a/dist/api/transform-messages.js b/dist/api/transform-messages.js
+index 6a364cbc634759b52af34044e207c6f1cdb29186..14dcab6f944d4fdc616b9a240a6a4a651d017eb4 100644
+--- a/dist/api/transform-messages.js
++++ b/dist/api/transform-messages.js
+@@ -60,7 +60,7 @@ function downgradeUnsupportedImages(messages, model) {
+  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
+  * Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
+  */
+-export function transformMessages(messages, model, normalizeToolCallId) {
++export function transformMessages(messages, model, normalizeToolCallId, sources) {
+     // Build a map of original tool call IDs to normalized IDs
+     const toolCallIdMap = new Map();
+     // Normalize null/undefined content from untyped callers (custom tools, hand-built
+@@ -135,6 +135,10 @@ export function transformMessages(messages, model, normalizeToolCallId) {
+         }
+         return msg;
+     });
++    if (sources) {
++        for (let index = 0; index < transformed.length; index++)
++            sources.set(transformed[index], messages[index]);
++    }
+     // Second pass: insert synthetic empty tool results for orphaned tool calls
+     // This preserves thinking signatures and satisfies API requirements
+     const result = [];
