@@ -1,6 +1,6 @@
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context'
 import { onCommit } from '../../lib/commits.ts'
-import type { ConversationId, Cursor } from '@earendil-works/pi-durable'
+import type { ConversationId, Cursor, EntryRecord } from '@earendil-works/pi-durable'
 import { isInput } from '../../lib/entries.ts'
 import type { ExtensionHost } from '../../server/extensions.ts'
 
@@ -10,8 +10,17 @@ export function activityBehavior(
   let stop: (() => void) | undefined
   let closed = false
   let draining: Promise<void> | undefined
-  const pending = new Set<ConversationId>()
-  const reconcile = async (id: ConversationId) => {
+  const pending = new Map<ConversationId, EntryRecord | undefined>()
+  const reconcile = async (id: ConversationId, assistant?: EntryRecord) => {
+    const message = assistant?.model?.[0]
+    if (message?.role === 'assistant' && typeof message.timestamp === 'number') {
+      await host.harness().commit(async (tx) => {
+        if (pending.has(id) || !(await tx.conversation(id))) return
+        const metadata = await tx.doc(host.metadata, id)
+        if (metadata.answerAt !== message.timestamp) metadata.answerAt = message.timestamp
+      }, context)
+      return
+    }
     const conversation = await host.harness().conversation(id, context)
     if (!conversation) return
     const { entries } = await conversation.context(context)
@@ -67,7 +76,7 @@ export function activityBehavior(
         if (closed) break
         const ids = [...pending]
         pending.clear()
-        for (const id of ids) await reconcile(id)
+        for (const [id, assistant] of ids) await reconcile(id, assistant)
       }
     })()
       .catch((error: unknown) => {
@@ -81,15 +90,24 @@ export function activityBehavior(
   host.onOpen(async () => {
     closed = false
     stop = onCommit(host.harness(), (publication) => {
+      const candidates = new Map<ConversationId, EntryRecord | undefined>()
+      const full = new Set<ConversationId>()
       for (const change of publication.changes) {
-        if (change.type === 'conversation') pending.add(change.value.id)
-        if (
-          change.type === 'entry' &&
-          (isInput(change.value) ||
-            change.value.model?.[0]?.role === 'assistant' ||
-            change.value.head !== undefined)
-        )
-          pending.add(change.value.conversationId)
+        if (change.type === 'conversation') full.add(change.value.id)
+        if (change.type !== 'entry') continue
+        const entry = change.value
+        if (isInput(entry) || entry.head !== undefined) full.add(entry.conversationId)
+        if (entry.model?.[0]?.role !== 'assistant') continue
+        if (entry.kind !== 'pi.assistant' || typeof entry.model[0].timestamp !== 'number')
+          full.add(entry.conversationId)
+        const previous = candidates.get(entry.conversationId)
+        if (!previous || entry.id > previous.id) candidates.set(entry.conversationId, entry)
+      }
+      for (const id of full) candidates.set(id, undefined)
+      for (const [id, assistant] of candidates) {
+        if (pending.has(id) && pending.get(id) === undefined) continue
+        const previous = pending.get(id)
+        pending.set(id, assistant && previous && previous.id > assistant.id ? previous : assistant)
       }
       if (pending.size) schedule()
     })
@@ -97,7 +115,7 @@ export function activityBehavior(
       let cursor: Cursor | undefined
       do {
         const page = await tx.scanConversations({}, 256, cursor)
-        for (const own of page.items) pending.add(own.id)
+        for (const own of page.items) pending.set(own.id, undefined)
         cursor = page.next
       } while (cursor !== undefined)
     }, context)
