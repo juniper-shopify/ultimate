@@ -49,7 +49,15 @@ export function modelTrace(trace: Pick<CallTrace, 'begin'>) {
 export function guardToolArguments<T extends Models>(models: T, trace?: ModelTrace): T {
   const streamSimple: Models['streamSimple'] = (model, context, options) => {
     const stream = guardStream(
-      (signal) => models.streamSimple(model, context, { ...options, signal }),
+      (signal) =>
+        models.streamSimple(model, context, {
+          ...options,
+          signal,
+          // Pi upstream: @earendil-works/pi-ai@1.5.2 dist/api/openai-responses.js — opt in to immutable input items after auditing the host's payload hooks. Drop when upstream provides identity-based request encoding.
+          ...(model.api === 'openai-responses'
+            ? { cacheFrozenResponseItems: options?.cacheFrozenResponseItems ?? true }
+            : {}),
+        }),
       model,
       options?.signal,
     )
