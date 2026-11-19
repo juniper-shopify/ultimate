@@ -35,6 +35,7 @@ const { values } = parseArgs({
     shape: { type: 'string', default: 'flat' },
     'think-ms': { type: 'string', default: '0' },
     'no-browser': { type: 'boolean', default: false },
+    'host-import': { type: 'string' },
   },
 })
 if (!values.output) throw new Error('Required: --output <result.json>')
@@ -209,7 +210,11 @@ try {
       cwd: build,
       env,
       detached: true,
-      execArgv: ['--import', join(here, 'guard.ts')],
+      execArgv: [
+        '--import',
+        join(here, 'guard.ts'),
+        ...(values['host-import'] ? ['--import', values['host-import']] : []),
+      ],
       stdio: ['ignore', log.fd, log.fd, 'ipc'],
     },
   )

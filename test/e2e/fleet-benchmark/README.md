@@ -6,6 +6,8 @@ Replay a generated fleet against one source/build directory, without model crede
 node scripts/fleet-benchmark.ts --build /path/to/build --output /tmp/fleet-before.json
 ```
 
+For source-level main-thread attribution, see the [generated-fleet profiler](../../../scripts/fleet-profile/README.md). It reuses this runner and its stream checks in four sequential passes, with explicit sampling/SQLite/async-attribution caveats.
+
 Run the same command against another checkout for an after result. Both checkouts need their locked dependencies installed. The runner uses the target's server, extensions and web code; it does not patch that checkout. Use the project's Node 26 runtime; the CPU meter uses `process.threadCpuUsage()`. No additional dependencies are needed.
 
 Defaults: 1,100 listed conversations, a floor of 1,600 live tasks, 160 conversations making real durable model/tool rounds, one counted event-stream client (plus the browser's own stream when enabled), and 30 seconds of measurement. A loopback OpenAI-compatible stand-in returns one synthetic `fleet_pulse` call per round. Each pulse waits 250 ms, increments a document and returns about 4 KB of generated text. Background sleeping tasks fill the graph to the requested size; measurement waits until every filler has reached its sleeping state. Actual sizes and throughput are in the result: transient model/tool tasks can move the graph above or below the initial floor.
