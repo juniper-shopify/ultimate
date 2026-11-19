@@ -50,6 +50,13 @@ compaction cut the active title source but preserve activity times from earlier 
 projection checks every conversation, reconciling those without a current checkpoint, including inherited fork
 history, and only commits metadata when the derived fields change.
 
+`overview.ts` derives run state, input/answer references and summary fields from committed records. After a successful
+reconciliation, a publication of LiveDoc, InboxDoc or Summaries is skipped when that document's own projected value
+(run presence, queued-input presence or the five summary fields) is unchanged. Pending or failed reconciliation,
+a copied source document, or a changed index row clears that conversation's knowledge; replacing the entire index
+clears all of it. The original triggers still repair from records. Activity and context retain separate transactions
+and failure/retry paths; unrelated publications allocate no candidate collections.
+
 All input detection uses `isInput` in `lib/entries.ts`: Pi Durable marks entries placed from input
 submissions with `input: true` (a small upstream patch). Pi's own `pi.user` input kind also counts,
 keeping existing history usable. Typed inputs count without an extension kind list; user-role writes
