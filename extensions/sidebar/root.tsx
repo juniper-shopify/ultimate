@@ -1,7 +1,7 @@
 import type { ConversationId } from '@earendil-works/pi-durable'
 import { ROOT } from '@/sdk'
 import type { ReactNode } from 'react'
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import {
   cn,
   formatAgo,
@@ -217,6 +217,7 @@ function PhasedFlightRow({
   const feature = useOverview()[conversation.id]?.feature
   const state = useBranchState(conversation, working, phase, previewUp, parked)
   const latest = Math.max(conversation.inputAt ?? 0, conversation.answerAt ?? 0)
+  const age = useMemo(() => (latest > 0 ? formatAgo(latest, now) : undefined), [latest, now])
   const title = conversation.title ?? `#${conversation.id}`
   return (
     <li>
@@ -286,9 +287,7 @@ function PhasedFlightRow({
                 {state.label}
               </span>
               {latest > 0 && (
-                <span className="ml-auto shrink-0 pl-1 text-muted-foreground/60">
-                  {formatAgo(latest, now)}
-                </span>
+                <span className="ml-auto shrink-0 pl-1 text-muted-foreground/60">{age}</span>
               )}
             </span>
           </button>
