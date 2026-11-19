@@ -2,6 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { TaskGraph } from '@earendil-works/pi-durable'
+import type { Op } from '@earendil-works/chord/delta'
+import { copyJson } from '@earendil-works/chord/json'
 import { expect, it, vi } from 'vitest'
 import { createApi, Events } from '../server/api.ts'
 
@@ -22,7 +24,7 @@ it('keeps initial and broadcast busy flags equal to the foreground-task scan', a
       15: makeTask(15, 99, false),
     },
   }
-  let advance!: (call: { kind: 'value'; value: TaskGraph }) => void
+  let advance!: (call: { kind: 'value'; value: TaskGraph; ops: readonly Op[] }) => void
   const harness = {
     observeTaskGraph: async (observer: { advance: typeof advance }) => {
       advance = observer.advance
@@ -58,12 +60,12 @@ it('keeps initial and broadcast busy flags equal to the foreground-task scan', a
   try {
     expect(lists).toEqual([expected()])
     graph = { tasks: { 12: makeTask(12, 2, false) } }
-    advance({ kind: 'value', value: graph })
+    advance({ kind: 'value', value: graph, ops: [['r', copyJson(graph)]] })
     await vi.runAllTimersAsync()
     expect(lists).toHaveLength(2)
     expect(lists.at(-1)).toEqual(expected())
     graph = { tasks: {} }
-    advance({ kind: 'value', value: graph })
+    advance({ kind: 'value', value: graph, ops: [['r', copyJson(graph)]] })
     await vi.runAllTimersAsync()
     expect(lists.at(-1)).toEqual(expected())
   } finally {

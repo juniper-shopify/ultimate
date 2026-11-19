@@ -79,6 +79,7 @@ const names = [
   'doc',
   'docOps',
   'tasks',
+  'tasksOps',
   'notice',
 ] as const satisfies readonly (keyof ServerEvents)[]
 
@@ -144,7 +145,7 @@ export function createStore(options: StoreOptions = {}) {
   const retainedConversationLimit = 6
 
   const lastWholeStateEventText: Partial<Record<keyof ServerEvents, string>> = {}
-  const snapshots = new Set<keyof ServerEvents>(['system', 'conversations', 'tasks'])
+  const snapshots = new Set<keyof ServerEvents>(['system', 'conversations'])
   function remember(view: StreamedView, raw?: string) {
     const id = view.conversation.id
     recentViewsWithRawSnapshots.delete(id)
@@ -212,6 +213,10 @@ export function createStore(options: StoreOptions = {}) {
       }
       case 'tasks':
         set({ tasks: data as TaskGraph })
+        break
+      case 'tasksOps':
+        if (state.tasks)
+          set({ tasks: applyImmutable(state.tasks, (data as ServerEvents['tasksOps']).ops) })
         break
       case 'notice':
         set({
