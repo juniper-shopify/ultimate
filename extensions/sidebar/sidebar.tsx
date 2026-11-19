@@ -182,7 +182,7 @@ function Tree({
         ),
     [topLevel, ultimateId],
   )
-  const { listed, hidden, listedIds, rootRows } = useMemo(() => {
+  const { listed, hidden, topLevelIds, rootRows } = useMemo(() => {
     const sorted = topLevel
       .filter((conversation) => !neverConcludedStandingAgent(conversation))
       .toSorted(newestInputFirst)
@@ -190,7 +190,7 @@ function Tree({
     return {
       listed: visible,
       hidden: sorted.filter((conversation) => hiddenIds.has(conversation.id)),
-      listedIds: new Set(topLevel.map((conversation) => conversation.id)),
+      topLevelIds: new Set(topLevel.map((conversation) => conversation.id)),
       rootRows: visible.filter((conversation) => roots.has(conversation.id)),
     }
   }, [topLevel, hiddenIds, roots])
@@ -198,7 +198,7 @@ function Tree({
   const openBranches = useMemo(() => {
     const branchesBelow = (id: number): ConversationSummary[] =>
       (branchesBySource.get(id) ?? [])
-        .filter((branch) => listedIds.has(branch.id) && !hiddenIds.has(branch.id))
+        .filter((branch) => topLevelIds.has(branch.id) && !hiddenIds.has(branch.id))
         .flatMap((branch) => [branch, ...branchesBelow(branch.id)])
     return rootRows
       .flatMap((root) => branchesBelow(root.id))
@@ -208,7 +208,7 @@ function Tree({
           stillOpen({ conversation: branch, working: working.has(branch.id) }, landings),
       )
       .toSorted(newestInputFirst)
-  }, [branchesBySource, listedIds, hiddenIds, rootRows, workspaceIndex, working, landings])
+  }, [branchesBySource, topLevelIds, hiddenIds, rootRows, workspaceIndex, working, landings])
   const openBranchIds = useMemo(
     () => new Set(openBranches.map((branch) => branch.id)),
     [openBranches],
@@ -422,7 +422,7 @@ function Tree({
         ? []
         : (branchesBySource.get(conversation.id) ?? []).filter(
             (branch) =>
-              listedIds.has(branch.id) &&
+              topLevelIds.has(branch.id) &&
               hiddenIds.has(branch.id) === concluded &&
               !openBranchIds.has(branch.id),
           )

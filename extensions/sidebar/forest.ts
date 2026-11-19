@@ -43,7 +43,13 @@ export function sidebarForest<T extends Conversation>(
   for (const conversation of conversations) {
     let current: T | undefined = conversation
     const path: number[] = []
+    const visited = new Set<number>()
     while (current && !tops.has(current.id)) {
+      if (visited.has(current.id)) {
+        current = undefined
+        break
+      }
+      visited.add(current.id)
       path.push(current.id)
       if (current.parentConversationId === undefined) break
       current = byId.get(current.parentConversationId)
