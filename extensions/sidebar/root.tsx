@@ -80,7 +80,9 @@ function useBranchState(
   const primary = standing?.ultimate
   const timers = timerWaits(useAutomations(5000).data, standing)
   const concludedSince = useConcludedSince()(conversation.id)
-  const starter = useStarters()(conversation.id)
+  const starter = useStarters(
+    conversation.branchOf && concludedSince !== Infinity ? [conversation.id] : [],
+  )(conversation.id)
   const underway = useUnderway()
   const queued = index.queue.find((item) => item.conversationId === conversation.id)
   const facts = {
