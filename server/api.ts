@@ -189,13 +189,11 @@ export async function createApi(
   let closed = false
   let summaries: ConversationSummary[] = []
   const projectIndex = conversationIndex(host.home)
-  let lastConversations = ''
+  const changedConversationIds = new Set<ConversationId>()
   const broadcastConversations = batch(conversationListBroadcastIntervalMs, () => {
-    const next = JSON.stringify(summaries)
-    if (next !== lastConversations) {
-      lastConversations = next
-      events.emit('conversations', summaries)
-    }
+    const changed = summaries.filter((row) => changedConversationIds.has(row.id))
+    changedConversationIds.clear()
+    if (changed.length) events.emit('conversationsUpsert', changed)
   })
   function scheduleConversations() {
     projectIndex.update(summaries)
@@ -250,6 +248,11 @@ export async function createApi(
         ),
       }
       const index = summariesIncludingConcurrentUpdates.findIndex((item) => item.id === summary.id)
+      if (
+        index < 0 ||
+        JSON.stringify(summariesIncludingConcurrentUpdates[index]) !== JSON.stringify(summary)
+      )
+        changedConversationIds.add(summary.id)
       if (index < 0) summariesIncludingConcurrentUpdates.push(summary)
       else summariesIncludingConcurrentUpdates[index] = summary
     }
@@ -260,7 +263,7 @@ export async function createApi(
   }
   await refreshConversations()
   broadcastConversations.cancel()
-  lastConversations = JSON.stringify(summaries)
+  changedConversationIds.clear()
   if (summaries.length) events.emit('conversations', summaries)
   projectIndex.update(summaries)
   let lastGraph = JSON.stringify(tasks())
@@ -269,12 +272,13 @@ export async function createApi(
     if (graphJson !== lastGraph) {
       lastGraph = graphJson
       events.emit('tasks', tasks())
-      const next = summaries.map((summary) => ({
-        ...summary,
-        busy: Object.values(tasks().tasks).some(
+      const next = summaries.map((summary) => {
+        const busy = Object.values(tasks().tasks).some(
           (task) => task.conversationId === summary.id && !task.background,
-        ),
-      }))
+        )
+        if (busy !== summary.busy) changedConversationIds.add(summary.id)
+        return { ...summary, busy }
+      })
       if (JSON.stringify(next) !== JSON.stringify(summaries)) {
         summaries = next
         scheduleConversations()

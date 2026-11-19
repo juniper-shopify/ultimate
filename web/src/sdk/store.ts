@@ -72,6 +72,7 @@ const names = [
   'stream',
   'system',
   'conversations',
+  'conversationsUpsert',
   'view',
   'ops',
   'ui',
@@ -184,6 +185,19 @@ export function createStore(options: StoreOptions = {}) {
           return unchangedRowKeepsIdentity ? kept : summary
         })
         set({ conversations })
+        break
+      }
+      case 'conversationsUpsert': {
+        delete lastWholeStateEventText.conversations
+        const conversations = new Map(state.conversations.map((summary) => [summary.id, summary]))
+        let changed = false
+        for (const summary of data as ServerEvents['conversationsUpsert']) {
+          const previous = conversations.get(summary.id)
+          if (previous && JSON.stringify(previous) === JSON.stringify(summary)) continue
+          conversations.set(summary.id, summary)
+          changed = true
+        }
+        if (changed) set({ conversations: [...conversations.values()] })
         break
       }
       case 'ops':

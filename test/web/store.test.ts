@@ -286,6 +286,40 @@ describe('web replica store', () => {
     store.stop()
   })
 
+  it('upserts changed conversation rows in place and appends new rows in received order', () => {
+    const { store, latest } = setup()
+    latest().open()
+    const rows = [
+      { id: 1 as ConversationId, title: 'Project', cwd: '/project', busy: false },
+      { id: 3 as ConversationId, title: 'Task', cwd: '/project', busy: false },
+    ]
+    latest().send('conversations', rows)
+    const untouched = store.getState().conversations[0]
+    const changed = { ...rows[1], title: 'Updated task', cwd: '/project/next', busy: true }
+    const added = { id: 2 as ConversationId, title: 'New task', busy: false }
+    latest().send('conversationsUpsert', [changed, added])
+    expect(store.getState().conversations).toEqual([rows[0], changed, added])
+    expect(store.getState().conversations[0]).toBe(untouched)
+    const materialized = store.getState().conversations
+    latest().send('conversationsUpsert', [changed, added])
+    expect(store.getState().conversations).toBe(materialized)
+    store.stop()
+  })
+
+  it('replaces upserts on reconnect even when the snapshot matches the earlier snapshot text', () => {
+    const { store, latest } = setup()
+    latest().open()
+    const rows = [{ id: 1 as ConversationId, title: 'Original', busy: false }]
+    latest().send('conversations', rows)
+    latest().send('conversationsUpsert', [{ ...rows[0], title: 'Changed', busy: true }])
+    expect(store.getState().conversations[0].title).toBe('Changed')
+    latest().drop()
+    latest().open()
+    latest().send('conversations', rows)
+    expect(store.getState().conversations).toEqual(rows)
+    store.stop()
+  })
+
   it('shows a conversation seen before at once, until its subscription brings a different snapshot', async () => {
     const { store, server, latest } = setup()
     latest().open()

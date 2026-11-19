@@ -220,9 +220,8 @@ it('leaves the log conversation out of conversation lists but serves it by id', 
     )
     const listed = () =>
       stream.events
-        .filter((event) => event.name === 'conversations')
-        .map((event) => (event.data as { id: number }[]).map((summary) => summary.id))
-        .at(-1) ?? []
+        .filter((event) => event.name === 'conversations' || event.name === 'conversationsUpsert')
+        .flatMap((event) => (event.data as { id: number }[]).map((summary) => summary.id))
     await until(() => listed().includes(later))
     expect(listed()).not.toContain(log)
     expect(probe.server.api.conversations().map((summary) => summary.id)).not.toContain(log)
