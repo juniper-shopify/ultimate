@@ -13,6 +13,7 @@ import type { ExtensionHost } from '../../server/extensions.ts'
 import { ContextUsageDoc } from './api.ts'
 import { rebuiltOnOpen } from '../../lib/errors.ts'
 import { isInput } from '../../lib/entries.ts'
+import { BackfillDoc, contextCheckpoint } from './backfill.ts'
 
 export function contextBehavior(
   host: Pick<ExtensionHost, 'harness' | 'onOpen' | 'onClose' | 'notice'> & {
@@ -26,14 +27,34 @@ export function contextBehavior(
 
   const reconcile = async (
     id: ConversationId,
-    assistant?: EntryRecord,
-    currentJob?: () => boolean,
+    assistant: EntryRecord | undefined,
+    currentJob: () => boolean,
+    backfill: boolean,
   ) => {
     if (closed) return
     const harness = host.harness()
+    if (
+      backfill &&
+      (await harness.commit(async (tx) => {
+        const checkpoint = await tx.doc(BackfillDoc, id)
+        if (checkpoint.context === undefined) return false
+        const tail = (await tx.latestEntryId(id)) ?? 0
+        const saved = await tx.doc(ContextUsageDoc, id)
+        const record = await tx.conversation(id)
+        if (record?.parent && saved.at === 0)
+          return checkpoint.context === contextCheckpoint(tail, saved, 'inherited')
+        const { model } = await tx.doc(AgentDoc, id)
+        const window = model
+          ? host.modelRuntime.getModel(model.provider, model.modelId)?.contextWindow
+          : undefined
+        return checkpoint.context === contextCheckpoint(tail, saved, window)
+      }, context))
+    )
+      return
     const conversation = await harness.conversation(id, context)
     if (!conversation) return
     const view = assistant ? undefined : await conversation.context(context)
+    const tail = assistant?.id ?? view!.entries.reduce((at, entry) => Math.max(at, entry.id), 0)
     const ownRequestEntries = assistant
       ? [assistant]
       : view!.entries.filter((entry) => entry.conversationId === id)
@@ -67,8 +88,12 @@ export function contextBehavior(
       if (closed) return
       const record = await tx.conversation(id)
       const previous = await tx.doc(ContextUsageDoc, id)
-      if (assistant && (!currentJob?.() || latest <= (previous.entry ?? 0))) return
-      if (record?.parent && latest === 0 && previous.at === 0) return
+      if (assistant && (!currentJob() || latest <= (previous.entry ?? 0))) return
+      const checkpoint = await tx.doc(BackfillDoc, id)
+      if (record?.parent && latest === 0 && previous.at === 0) {
+        checkpoint.context = contextCheckpoint(tail, previous, 'inherited')
+        return
+      }
       const { model } = await tx.doc(AgentDoc, id)
       const window = model
         ? host.modelRuntime.getModel(model.provider, model.modelId)?.contextWindow
@@ -94,16 +119,19 @@ export function contextBehavior(
         previous.window === next.window &&
         previous.percent === next.percent &&
         previous.estimated === next.estimated
-      )
+      ) {
+        checkpoint.context = contextCheckpoint(tail, previous, window)
         return
+      }
       for (const key of ['tokens', 'window', 'percent', 'estimated'] as const) delete previous[key]
       Object.assign(previous, next)
+      checkpoint.context = contextCheckpoint(tail, previous, window)
     }, context)
   }
 
-  const schedule = (id: ConversationId, assistant?: EntryRecord) => {
+  const schedule = (id: ConversationId, assistant?: EntryRecord, backfill = false) => {
     const job: Promise<void> = (pending.get(id) ?? Promise.resolve())
-      .then(() => reconcile(id, assistant, () => pending.get(id) === job))
+      .then(() => reconcile(id, assistant, () => pending.get(id) === job, backfill))
       .catch((error: unknown) => {
         if (!closed) host.notice(`Conversation context: ${String(error)}`)
       })
@@ -172,7 +200,7 @@ export function contextBehavior(
           .commit((tx) => tx.scanConversations({}, 64, cursor), context)
         for (const conversation of page.items) {
           if (closed) return
-          await schedule(conversation.id)
+          await schedule(conversation.id, undefined, true)
         }
         cursor = page.next
       } while (cursor !== undefined)
