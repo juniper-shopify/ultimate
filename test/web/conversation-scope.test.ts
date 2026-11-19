@@ -371,27 +371,29 @@ it('adds a view to a document-only subscription, keeps documents after the scope
   expect(store.getState().viewsOf[23]).toBeUndefined()
   const releaseView = store.watchConversation(23 as ConversationId)
   await tick()
-  expect(docs.closed).toBe(true)
+  expect(docs.closed).toBe(false)
   const both = source(23)
+  expect(both).toBe(docs)
   both.send('view', view(23, 'now retained'))
-  both.send('doc', { kind: counter.kind, value: { n: 2 } })
+  both.send('docOps', { kind: counter.kind, ops: [['s', ['n'], 2]] })
   releaseView()
   await tick()
-  // Documents only again: the value stays until the new subscription's snapshot.
-  expect(both.closed).toBe(true)
+  // Documents only again: the existing watch carries on without a snapshot.
+  expect(both.closed).toBe(false)
   expect(store.getState().viewsOf[23]).toBeUndefined()
   expect(store.getState().docsOf[23]?.[counter.kind]).toEqual({ n: 2 })
   const only = source(23)
+  expect(only).toBe(both)
   expect(only.view).toBe(false)
-  only.send('doc', { kind: counter.kind, value: { n: 2 } })
   only.send('docOps', { kind: counter.kind, ops: [['s', ['n'], 3]] })
   expect(store.getState().docsOf[23]?.[counter.kind]).toEqual({ n: 3 })
 
-  // Watched again, the view comes from a new subscription's snapshot, and its ops apply to it.
+  // Watched again, only the added view needs a snapshot, and its ops apply to it.
   effects.push(store.watchConversation(23 as ConversationId))
   await tick()
-  expect(only.closed).toBe(true)
+  expect(only.closed).toBe(false)
   const again = source(23)
+  expect(again).toBe(only)
   again.send('view', view(23, 'back'))
   again.send('ops', [['a', ['entries', 0, 'model', 0, 'content'], ' again']])
   expect(store.getState().viewsOf[23]?.entries[0].model?.[0]).toMatchObject({
