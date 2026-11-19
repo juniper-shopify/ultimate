@@ -11,7 +11,7 @@ import {
   PauseIcon,
   PencilIcon,
 } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { memo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   DropdownMenu,
@@ -120,20 +120,43 @@ type RowProps = {
   unseen: boolean
   concluded: boolean
   now: number
-  onConclude: (conclude: boolean) => void
+  onConclude: (id: number, conclude: boolean) => void
   state?: ConversationState
   waitLabel?: string
   activity?: string
   feature?: string
 }
 
-export function Row(props: RowProps) {
+function RowView(props: RowProps) {
   return (
     <Provided input={props.working ? props.conversation.id : undefined} point={ConversationPhase}>
-      {(phase) => <PhasedRow {...props} displayPhase={phase} />}
+      {(phase) => <MemoPhasedRow {...props} displayPhase={phase} />}
     </Provided>
   )
 }
+
+function sameConversation(a: ConversationSummary, b: ConversationSummary) {
+  if (a === b) return true
+  const keys = Object.keys(a) as (keyof ConversationSummary)[]
+  return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key])
+}
+
+export const Row = memo(
+  RowView,
+  (a, b) =>
+    sameConversation(a.conversation, b.conversation) &&
+    a.shown === b.shown &&
+    a.draft === b.draft &&
+    a.working === b.working &&
+    a.unseen === b.unseen &&
+    a.concluded === b.concluded &&
+    a.now === b.now &&
+    a.onConclude === b.onConclude &&
+    a.state === b.state &&
+    a.waitLabel === b.waitLabel &&
+    a.activity === b.activity &&
+    a.feature === b.feature,
+)
 
 function PhasedRow({
   conversation,
@@ -288,13 +311,15 @@ function PhasedRow({
         <RowMenu
           concluded={concluded}
           conversation={conversation}
-          onConclude={onConclude}
+          onConclude={(conclude) => onConclude(conversation.id, conclude)}
           onRename={rename}
         />
       )}
     </div>
   )
 }
+
+const MemoPhasedRow = memo(PhasedRow)
 
 export function RowMenu({
   conversation,
