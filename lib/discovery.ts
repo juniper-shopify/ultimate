@@ -12,6 +12,7 @@ import { extensionSettings } from './extension-settings.ts'
 import { coreTier, defaultOff } from '../shared/extension-api.ts'
 
 const sourceOrder = { builtin: 0, user: 1, project: 2 }
+const directoryReadConcurrency = 16
 
 export function compareExtensions(
   a: { name: string; source: Source; order?: number },
@@ -54,35 +55,44 @@ export async function discoverExtensions(
         return []
       },
     )
-    for (const entry of entries) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
-      const path = join(directory, entry.name)
-      try {
-        if (!(await stat(path)).isDirectory()) continue
-        const files = await readdir(path)
-        const coreBelongsToBuiltinName = root.source === 'builtin' || builtinCore.has(entry.name)
-        const core =
-          coreBelongsToBuiltinName &&
-          files.includes('api.ts') &&
-          coreTier.test(await readFile(join(path, 'api.ts'), 'utf8'))
-        if (core && root.source === 'builtin') builtinCore.add(entry.name)
-        winners.set(entry.name, {
-          name: entry.name,
-          path,
-          target: await resolveLinkTargetOnEveryDiscovery(path),
-          source: root.source,
-          files,
-          ...(core ? { core } : {}),
-        })
-      } catch (error) {
-        winners.set(entry.name, {
-          name: entry.name,
-          path,
-          target: path,
-          source: root.source,
-          files: [],
-          error: String(error),
-        })
+    for (let start = 0; start < entries.length; start += directoryReadConcurrency) {
+      const discovered = await Promise.all(
+        entries.slice(start, start + directoryReadConcurrency).map(async (entry) => {
+          if (!entry.isDirectory() && !entry.isSymbolicLink()) return undefined
+          const path = join(directory, entry.name)
+          try {
+            if (!(await stat(path)).isDirectory()) return undefined
+            const files = await readdir(path)
+            const coreBelongsToBuiltinName =
+              root.source === 'builtin' || builtinCore.has(entry.name)
+            const core =
+              coreBelongsToBuiltinName &&
+              files.includes('api.ts') &&
+              coreTier.test(await readFile(join(path, 'api.ts'), 'utf8'))
+            if (core && root.source === 'builtin') builtinCore.add(entry.name)
+            return {
+              name: entry.name,
+              path,
+              target: await resolveLinkTargetOnEveryDiscovery(path),
+              source: root.source,
+              files,
+              ...(core ? { core } : {}),
+            }
+          } catch (error) {
+            return {
+              name: entry.name,
+              path,
+              target: path,
+              source: root.source,
+              files: [],
+              error: String(error),
+            }
+          }
+        }),
+      )
+      for (const entry of discovered) {
+        if (!entry) continue
+        winners.set(entry.name, entry)
       }
     }
   }
