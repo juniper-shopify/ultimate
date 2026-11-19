@@ -25,6 +25,7 @@
   registered under the scratch home) for the user to open remotely, and frees only that port when it stops; the live
   server's address is untouched. Stop it and delete the scratch home when done.
   A state you cannot reach is reported as unverified, never faked by injecting entries.
+- Conversation-list events coalesce in a fixed 100 ms window, not a quiet-period debounce; server-side cached summaries still refresh on every relevant commit. New streams get the full cached list immediately. A page's list busy flags can trail its task snapshot by one window, and closing the API cancels pending list notifications.
 - `tsconfig.swap.json` is the server-only type-check gate for swaps.
 - `tsconfig.json` (server, tests, tooling) references `tsconfig.web.json` (browser: `web/src`, `extensions/**/*.tsx`).
   `pnpm check` type-checks both; with plain `tsc`, run `tsc -b`.
