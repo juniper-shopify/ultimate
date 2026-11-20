@@ -51,3 +51,16 @@ published graph once per connection, then `tasksOps` carries `{ ops }` folded ov
 opened during a window starts from that published baseline, not the newer graph those pending ops already include.
 The browser applies ops immutably; reconnecting replaces its graph from a fresh snapshot before applying further ops.
 An overflowing pending-ops queue sends a root replacement in `tasksOps`, as document operations can.
+
+Document-only subscription requests use a four-wide background lane (`backgroundSubscriptionRequestLimit` in the
+browser store). With a typical six-connection HTTP/1.1 browser and one EventSource, four background requests leave
+one slot for interaction when no other request occupies it. If other requests take the reserve, the lane still
+bounds the browser's queue to a few background requests, not hundreds; it cannot bound the time a server takes to
+answer one. Main/view subscriptions, reserved-root documents and documents of the shown conversation bypass the
+lane; queued documents are promoted when shown. Click-opened documents for other conversations remain background.
+Background creates and DELETEs drain FIFO; a DELETE may wait behind prior creates while the server keeps watching.
+There is no new timeout: one hung request occupies one lane slot until close or reconnect; four can stop background
+progress. Previously one hung request occupied one of the browser's request slots while the others kept working.
+Closing a queued subscription sends nothing; reconnect aborts the old lane and subscribes in full. The lane does
+not fix unrelated slow actions or prioritize requests already handed to the browser. It adds no server capability
+or endpoint and uses the existing single-subscription POST/DELETE contract.
