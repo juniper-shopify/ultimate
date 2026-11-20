@@ -1,69 +1,70 @@
+import { once } from 'node:events'
 import { expect, it } from 'vitest'
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import type { ToolExecutionApi } from '@earendil-works/pi-durable'
 import codemode, { actions } from '../server.ts'
+import { historyReads } from '../history-reads.ts'
 import type { ActionContext } from '../../../server/actions.ts'
-import type { ExtensionHost } from '../../../server/extensions.ts'
+import { historyFixture } from './history-fixture.ts'
 
-function fixture(onPage: (pages: number) => void = () => {}) {
-  const text = 'Synthetic search content with quotes "source".\n'.repeat(80)
-  const records = Array.from({ length: 20 }, (_, i) => ({ id: i + 1 }))
-  const entries = records.map((record) =>
-    Array.from({ length: 400 }, (_, i) => ({
-      id: record.id * 1000 + 400 - i,
-      conversationId: record.id,
-      kind: 'test.note',
-      data: { text },
-    })),
-  )
-  let pages = 0
-  const host = {
-    home: '',
-    chapter: { name: 'active' },
-    harness: () => ({
-      commit: async (fn: (tx: unknown) => unknown) =>
-        fn({ scanConversations: async () => ({ items: records }) }),
-      conversation: async (id: number) => ({
-        entries: async (_query: unknown, count: number, cursor = 0) => {
-          onPage(++pages)
-          return {
-            items: entries[id - 1].slice(cursor, cursor + count),
-            ...(cursor + count < entries[id - 1].length ? { next: cursor + count } : {}),
-          }
-        },
-      }),
-    }),
-  } as unknown as ExtensionHost
-  return { host, pages: () => pages }
-}
+it('stops a store-wide search on abort and waits for its worker to exit', async () => {
+  const store = await historyFixture()
+  const controller = new AbortController()
+  const reason = new Error('Read cancelled')
+  try {
+    const result = actions
+      .read({ op: 'search', args: ['absent-search-needle'] }, {
+        host: store.host,
+        signal: controller.signal,
+      } as ActionContext)
+      .catch((error: unknown) => error)
+    await store.workerRegistered
+    const reader = historyReads(store.host)
+    const worker = [...reader.workers.keys()][0]
+    const messages: string[] = []
+    worker.on('message', (message: { kind: string }) => messages.push(message.kind))
+    await once(worker, 'online')
+    const abortedAt = performance.now()
+    controller.abort(reason)
+    expect(await result).toBe(reason)
+    expect(performance.now() - abortedAt).toBeLessThan(1000)
+    expect(messages).toContain('aborted')
+    expect(messages).not.toContain('result')
+    expect(reader.workers.size).toBe(0)
+    expect(store.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()?.busy).toBe(0)
+  } finally {
+    await store.close()
+  }
+})
 
-it.each([
-  ['search', ['absent-search-needle']],
-  ['entries', [1, { kinds: ['missing'] }]],
-])('stops %s within one page of an abort', async (op, args) => {
+it('stops entries within one page of an abort', async () => {
   const controller = new AbortController()
   const reason = new Error('Read cancelled')
   let pagesAtAbort = 0
-  const store = fixture((pages) => {
-    if (pages === (op === 'search' ? 40 : 2))
+  const store = await historyFixture((pages) => {
+    if (pages === 2)
       queueMicrotask(() => {
         pagesAtAbort = store.pages()
         controller.abort(reason)
       })
   })
-  await expect(
-    actions.read({ op, args }, {
-      host: store.host,
-      signal: controller.signal,
-    } as ActionContext),
-  ).rejects.toBe(reason)
-  expect(pagesAtAbort).toBeGreaterThan(0)
-  expect(store.pages()).toBeLessThanOrEqual(pagesAtAbort + 1)
-  expect(store.pages()).toBeLessThan(op === 'search' ? 80 : 4)
+  try {
+    await expect(
+      actions.read({ op: 'entries', args: [1, { kinds: ['missing'] }] }, {
+        host: store.host,
+        signal: controller.signal,
+      } as ActionContext),
+    ).rejects.toBe(reason)
+    expect(pagesAtAbort).toBeGreaterThan(0)
+    expect(store.pages()).toBeLessThanOrEqual(pagesAtAbort + 1)
+    expect(store.pages()).toBeLessThan(4)
+  } finally {
+    await store.close()
+  }
 })
 
 it('stops an unawaited sandbox search when its call signal is cancelled', async () => {
-  const store = fixture()
+  const store = await historyFixture()
   let settled!: () => void
   let cancelled = false
   const searchSettled = new Promise<void>((resolve) => {
@@ -82,17 +83,18 @@ it('stops an unawaited sandbox search when its call signal is cancelled', async 
       }
     },
   } as unknown as ToolExecutionApi
-  const tool = codemode(store.host).tools![0]
-  const result = await tool.execute(
-    { code: "ultimate.search('absent-search-needle'); return 'finished';" },
-    api,
-    BACKGROUND_CONTEXT,
-  )
-  const pagesAtFinish = store.pages()
-  await searchSettled
-  expect(result.isError).not.toBe(true)
-  expect(cancelled).toBe(true)
-  expect(pagesAtFinish).toBeGreaterThan(0)
-  expect(store.pages()).toBeLessThanOrEqual(pagesAtFinish + 1)
-  expect(store.pages()).toBeLessThan(80)
+  try {
+    const tool = codemode(store.host).tools![0]
+    const result = await tool.execute(
+      { code: "ultimate.search('absent-search-needle'); return 'finished';" },
+      api,
+      BACKGROUND_CONTEXT,
+    )
+    await searchSettled
+    expect(result.isError).not.toBe(true)
+    expect(cancelled).toBe(true)
+    expect(historyReads(store.host).workers.size).toBe(0)
+  } finally {
+    await store.close()
+  }
 })
