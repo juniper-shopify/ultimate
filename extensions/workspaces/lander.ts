@@ -154,6 +154,7 @@ type Settings = {
   push?: string
 }
 const maxTargetMoveAttempts = 3
+const pushTimeoutMs = 30 * 60 * 1000
 type CheckLimits = { stall: Seconds; total: Seconds }
 const defaultCheckLimitsSeconds: CheckLimits = { stall: 2 * 60, total: 10 * 60 }
 export const limitsFor = (check: Check, limits: CheckLimits): CheckLimits =>
@@ -363,6 +364,43 @@ export async function landingRecord(
       flaky,
       note: `Commit/path lists unavailable: ${failure(error)}\nRestart requirement unknown: audit server/, shared/, patches/ and pnpm-lock.yaml when updating Ultimate.`,
     }
+  }
+}
+export async function runLanderPush(
+  source: string,
+  name: string,
+  sha: string,
+  target: string,
+  context: Context,
+  home: string,
+  timeout = pushTimeoutMs,
+) {
+  const timer = new AbortController()
+  const signal = AbortSignal.any([
+    timer.signal,
+    ...(context.abortSignal ? [context.abortSignal] : []),
+  ])
+  const cancel = deadline(timeout, () => timer.abort())
+  let output = ''
+  try {
+    const { code } = await runGroup('git', ['push', '-q', name, `${sha}:refs/heads/${target}`], {
+      cwd: source,
+      signal,
+      grace: 2000,
+      pidFile: join(checkPids(home), `${process.pid}-push-${randomUUID()}.pid`),
+      onOutput: (text) => {
+        output = (output + text).slice(-3000)
+      },
+    })
+    if (code === 0) return
+    context.abortSignal?.throwIfAborted()
+    if (timer.signal.aborted)
+      throw new Error(
+        `Push timed out after ${seconds(timeout / 1000)}${output ? `:\n${output}` : ''}`,
+      )
+    if (code !== 0) throw new Error(output || `git push exited ${code}`)
+  } finally {
+    cancel()
   }
 }
 const landedOutcome = (landed: LandingRecord): LandingOutcome => ({
@@ -629,15 +667,22 @@ export function createLander(
         const checkContext = withAbortSignal(signal, context)
         const push = async (settings: Settings, checkedCommit: string) => {
           if (!settings.push) return { text: 'Not pushed.' }
+          if (await contains(source, checkedCommit, `refs/remotes/${settings.push}/${target}`)) {
+            await step(`already pushed to ${settings.push}/${target}`)
+            return {
+              remote: `${settings.push}/${target}`,
+              text: `Pushed to ${settings.push}/${target}.`,
+            }
+          }
           await step(`pushing to ${settings.push}`)
           try {
-            await remote(
+            await runLanderPush(
               source,
-              signal,
-              'push',
-              '-q',
               settings.push,
-              `${checkedCommit}:refs/heads/${target}`,
+              checkedCommit,
+              target,
+              checkContext,
+              host.home,
             )
             return {
               remote: `${settings.push}/${target}`,
