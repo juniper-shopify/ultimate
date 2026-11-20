@@ -86,6 +86,19 @@ export function Conversations() {
 }
 const none: ReadonlySet<number> = new Set()
 
+function StartedRow({
+  conversation,
+  concluded,
+  children,
+}: {
+  conversation: ConversationSummary
+  concluded: boolean
+  children: (starter: number | null | undefined) => ReactNode
+}) {
+  const starterOf = useStarters(conversation.branchOf && !concluded ? [conversation.id] : [])
+  return children(starterOf(conversation.id))
+}
+
 function Tree({
   waiting,
   parked,
@@ -152,7 +165,6 @@ function Tree({
   const standingIds = useDocOf(ROOT, StandingDoc)
   const ultimateId = standingIds?.ultimate
   const timers = timerWaits(useAutomations(5000).data, standingIds)
-  const starterOf = useStarters()
   const underway = useUnderway()
   const primaryWait =
     ultimateId === undefined
@@ -372,43 +384,53 @@ function Tree({
           working={working.get(conversation.id)}
         />
       )
-    const recorded = seen[conversation.id]
-    const facts = {
-      id: conversation.id,
-      kind: 'other' as const,
-      runState: overview[conversation.id]?.runState,
-      busy: underway(conversation.id),
-      parked: parked.has(conversation.id),
-      starter: starterOf(conversation.id),
-      concludedSince: concludedSince(conversation.id),
-    }
-    const derived = conversationState(facts, log, timers)
-    const wait = labelOf(facts)
-    const workingUnlessQuestionWaitsOnUser =
-      derived === 'waits'
-        ? undefined
-        : (working.get(conversation.id) ?? (derived === 'working' ? 'self' : undefined))
     return (
-      <Row
-        activity={overview[conversation.id]?.activity}
-        state={derived}
-        waitLabel={derived === 'awaiting' ? wait : undefined}
-        concluded={hiddenIds.has(conversation.id)}
+      <StartedRow
         conversation={conversation}
-        draft={conversation.inputAt === undefined}
-        feature={overview[conversation.id]?.feature}
+        concluded={concludedSince(conversation.id) === Infinity}
         key={conversation.id}
-        now={now}
-        onConclude={(conclude) => void requestConclude(conversation.id, conclude)}
-        shown={shown}
-        unseen={
-          recorded !== undefined &&
-          (conversation.answerAt ?? 0) > recorded &&
-          conversation.id !== shownId &&
-          workingUnlessQuestionWaitsOnUser === undefined
-        }
-        working={workingUnlessQuestionWaitsOnUser}
-      />
+      >
+        {(starter) => {
+          const recorded = seen[conversation.id]
+          const facts = {
+            id: conversation.id,
+            kind: 'other' as const,
+            runState: overview[conversation.id]?.runState,
+            busy: underway(conversation.id),
+            parked: parked.has(conversation.id),
+            starter,
+            concludedSince: concludedSince(conversation.id),
+          }
+          const derived = conversationState(facts, log, timers)
+          const wait = labelOf(facts)
+          const workingUnlessQuestionWaitsOnUser =
+            derived === 'waits'
+              ? undefined
+              : (working.get(conversation.id) ?? (derived === 'working' ? 'self' : undefined))
+          return (
+            <Row
+              activity={overview[conversation.id]?.activity}
+              state={derived}
+              waitLabel={derived === 'awaiting' ? wait : undefined}
+              concluded={hiddenIds.has(conversation.id)}
+              conversation={conversation}
+              draft={conversation.inputAt === undefined}
+              feature={overview[conversation.id]?.feature}
+              key={conversation.id}
+              now={now}
+              onConclude={(conclude) => void requestConclude(conversation.id, conclude)}
+              shown={shown}
+              unseen={
+                recorded !== undefined &&
+                (conversation.answerAt ?? 0) > recorded &&
+                conversation.id !== shownId &&
+                workingUnlessQuestionWaitsOnUser === undefined
+              }
+              working={workingUnlessQuestionWaitsOnUser}
+            />
+          )
+        }}
+      </StartedRow>
     )
   }
 

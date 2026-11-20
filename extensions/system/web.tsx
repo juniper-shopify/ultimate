@@ -54,14 +54,25 @@ function useLive() {
   return useUltimate().surface === 'system' && visible
 }
 
-function useStates(parked: ReadonlySet<number>) {
+function useStates(parked: ReadonlySet<number>, lanes: readonly Lane[]) {
   const log = useDocOf(ROOT, MessagesDoc) ?? emptyMessages
   const overview = useOverview()
   const conversations = useConversations()
   const standing = useDocOf(ROOT, StandingDoc)
   const primary = standing?.ultimate
   const timers = timerWaits(useAutomations(5000).data, standing)
-  const starterOf = useStarters()
+  const concludedSince = useConcludedSince()
+  const mounted = new Set(lanes.map((lane) => lane.conversation))
+  const starterOf = useStarters(
+    conversations
+      .filter(
+        (conversation) =>
+          conversation.branchOf &&
+          mounted.has(conversation.id) &&
+          concludedSince(conversation.id) !== Infinity,
+      )
+      .map((conversation) => conversation.id),
+  )
   const underway = useUnderway()
   const primaryWait =
     primary === undefined
@@ -77,7 +88,6 @@ function useStates(parked: ReadonlySet<number>) {
           timers,
         )
   const remote = useRemoteProgress(primaryWait?.on === 'remote' ? primaryWait.project : undefined)
-  const concludedSince = useConcludedSince()
   return (lane: Lane) => {
     const id = lane.conversation
     const own = conversations.find((item) => item.id === id)
@@ -207,8 +217,8 @@ function Lanes({ parked, tabs }: { parked: ReadonlySet<number>; tabs: ReactNode 
   const now = useNow(1000, live)
   const range = windows[window].ms
   const lanes = useLanes(range, live)
-  const stateOf = useStates(parked)
   const list = lanes.data?.lanes ?? []
+  const stateOf = useStates(parked, list)
   const derived = list.map((lane) => [lane.conversation, stateOf(lane)] as const)
   const states = new Map(derived.map(([id, value]) => [id, value.state]))
   const labels = new Map(derived.map(([id, value]) => [id, value.label]))
