@@ -1,6 +1,7 @@
 import { isOpen, openQuestion } from './message-state.ts'
 
 export type Wait =
+  | { on: 'loading' }
   | { on: 'work' }
   | { on: 'user' }
   | { on: 'agent'; to: number }
