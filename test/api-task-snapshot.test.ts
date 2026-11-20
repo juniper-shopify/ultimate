@@ -63,7 +63,7 @@ it('reads only the latest task snapshot once when its broadcast window closes', 
       })
     }
     expect(reads).toBe(0)
-    await vi.advanceTimersByTimeAsync(100)
+    await vi.advanceTimersByTimeAsync(1000)
     expect(reads).toBe(1)
     expect(replica).toEqual(graph)
   } finally {

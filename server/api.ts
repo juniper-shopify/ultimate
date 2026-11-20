@@ -79,7 +79,7 @@ const validUiKey = (key: unknown) =>
 const actionPath = /^\/api\/extensions\/([^/]+)\/actions\/([^/]+)$/
 const subscriptionPath = /^\/api\/events\/([0-9a-f-]+)\/(\d+)$/
 const maxResentSummaryTitleCharacters = 200
-const taskGraphBroadcastIntervalMs = 100
+const taskGraphBroadcastIntervalMs = 1000
 const liveViewMinimumEntries = 150
 function busyConversations(graph: TaskGraph) {
   const busy = new Set<ConversationId>()

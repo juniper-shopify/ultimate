@@ -182,10 +182,12 @@ it('materializes changed rows from both publishers in server order and resets on
     await vi.advanceTimersByTimeAsync(100)
     expect(await client.next()).toMatchObject({
       name: 'conversationsUpsert',
-      rows: [
-        { id: 2, busy: false },
-        { id: 3, title: 'New conversation' },
-      ],
+      rows: [{ id: 3, title: 'New conversation' }],
+    })
+    await vi.advanceTimersByTimeAsync(800)
+    expect(await client.next()).toMatchObject({
+      name: 'conversationsUpsert',
+      rows: [{ id: 2, busy: false }],
     })
     expect(client.store.getState().conversations).toEqual(f.api.conversations())
     expect(client.store.getState().conversations.map((row) => row.id)).toEqual([1, 2, 3])
