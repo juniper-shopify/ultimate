@@ -28,7 +28,8 @@ tools and new context until another answer. Model changes update the window. Unk
 milliseconds (the answer/head message timestamp, or when the estimate was made if absent); `entry` identifies the
 source assistant or head entry. A fork starts at `{ at: 0 }`, without inheriting its parent's measurement.
 A watcher follows Pi's commits and writes the document in its own commit, serially per conversation, only when it
-changes. On open, background reconciliation scans bounded pages and recovers missing or stale source entries without
+changes. Plain assistant commits supply usage and activity timestamps directly; mixed or structural changes keep
+full-context reconciliation. On open, background reconciliation scans bounded pages and recovers missing or stale source entries without
 blocking startup. The status line reads this same document, independent of which browser is open.
 
 `compactions.ts` emits `conversations.compacted` `{ conversation, entry, reason? }` (`Compacted` in `refs.ts`) for
