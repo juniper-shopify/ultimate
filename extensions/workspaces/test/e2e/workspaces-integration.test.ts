@@ -1849,7 +1849,9 @@ it.concurrent('resumes a group after a restart without a third run of its twice-
   // The failing member's rerun outcome is stored while its sibling still runs.
   await until(async () => {
     const record = await f.opened.harness.commit((tx) => tx.task(task), context)
-    return record?.memos?.[`check:${submission}:1:0.0:rerun`] !== undefined
+    return Object.keys(record?.memos ?? {}).some(
+      (name) => name.startsWith(`check:${submission}:1:0.0:`) && name.endsWith(':rerun'),
+    )
   })
   await held.started()
   await f.reopen()

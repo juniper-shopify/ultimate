@@ -1,7 +1,9 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { writeJson } from '../../lib/json-file.ts'
-import { settled } from '../../lib/errors.ts'
+import { inProcess, settled } from '../../lib/errors.ts'
+import { deadline } from '../../lib/timers.ts'
+import type { Cancel } from '../../lib/timers.ts'
 import type { ProviderHealth } from './refs.ts'
 
 type EpochMilliseconds = number
@@ -225,28 +227,6 @@ export async function readHealth(userHome: string, now = Date.now()): Promise<Pr
 
 const processWriteQueue = new Map<string, Promise<unknown>>()
 
-export async function record(
-  userHome: string,
-  provider: string,
-  update: HealthEntry,
-): Promise<Flip> {
-  const clean = update.error === undefined ? update : { ...update, error: sanitize(update.error) }
-  let flip: Flip = { provider, from: 'unknown', to: 'unknown' }
-  await serializeHealthWrite(userHome, (file) => {
-    const before = file.providers[provider] ?? {}
-    const after = apply(before, clean)
-    file.providers[provider] = after
-    const to = state(after)
-    flip = {
-      provider,
-      from: state(before),
-      to,
-      ...(to === 'failing' && after.error ? { error: after.error } : {}),
-    }
-  })
-  return flip
-}
-
 export type Flip = {
   provider: string
   from: ProviderHealth['state']
@@ -254,25 +234,124 @@ export type Flip = {
   error?: string
 }
 
-export async function reset(userHome: string, providers: string[]): Promise<Flip[]> {
-  const flips: Flip[] = []
-  await serializeHealthWrite(userHome, (file) => {
-    for (const provider of providers) {
-      flips.push({ provider, from: state(file.providers[provider] ?? {}), to: 'unknown' })
-      delete file.providers[provider]
-    }
-  })
-  return flips
+function healthFlip(provider: string, before: HealthEntry, after: HealthEntry): Flip {
+  const to = state(after)
+  return {
+    provider,
+    from: state(before),
+    to,
+    ...(to === 'failing' && after.error ? { error: after.error } : {}),
+  }
 }
 
-function serializeHealthWrite(userHome: string, change: (file: HealthFile) => void) {
+export const WRITE_INTERVAL = 5_000
+
+const activeError = (entry: HealthEntry) =>
+  (entry.lastFail ?? -Infinity) > (entry.lastOk ?? -Infinity) ? entry.error : undefined
+
+export function healthRecorder(
+  userHome: string,
+  announce: (flips: Flip[]) => Promise<void> = async () => {},
+) {
+  const pending = new Map<string, HealthEntry>()
+  const written = new Map<string, number>()
+  const timers = new Map<string, Cancel>()
+  let closed = false
+
+  const cancel = (provider: string) => {
+    timers.get(provider)?.()
+    timers.delete(provider)
+  }
+  const save = async (provider: string, update?: HealthEntry) => {
+    let flip!: Flip
+    await withHealthFile(userHome, async (file) => {
+      const before = file.providers[provider] ?? {}
+      if (!update && !pending.has(provider)) {
+        flip = healthFlip(provider, before, before)
+        return
+      }
+      const sample = merge(pending.get(provider) ?? {}, update ?? {})
+      const clean =
+        sample.error === undefined ? sample : { ...sample, error: sanitize(sample.error) }
+      const after = apply(before, clean)
+      flip = healthFlip(provider, before, after)
+      const now = Date.now()
+      const due = (written.get(provider) ?? -Infinity) + WRITE_INTERVAL
+      const immediate =
+        sample.lastFail !== undefined ||
+        flip.from !== flip.to ||
+        activeError(before) !== activeError(after)
+      pending.set(provider, clean)
+      if (update && !closed && !immediate && now < due) {
+        if (!timers.has(provider))
+          timers.set(
+            provider,
+            deadline(
+              due - now,
+              () => {
+                timers.delete(provider)
+                inProcess(
+                  'a health sample is advisory: the next response records its state',
+                  save(provider)
+                    .then((change) => announce([change]))
+                    .catch((error: unknown) => {
+                      console.error('health: flushing a response failed:', error)
+                    }),
+                )
+              },
+              { unref: true },
+            ),
+          )
+        return
+      }
+      file.providers[provider] = after
+      await writeJson(healthPath(userHome), file)
+      written.set(provider, now)
+      pending.delete(provider)
+      cancel(provider)
+    })
+    return flip
+  }
+  return {
+    record: (provider: string, update: HealthEntry) => save(provider, update),
+    reset: (providers: string[]) =>
+      withHealthFile(userHome, async (file) => {
+        const flips: Flip[] = []
+        for (const provider of providers) {
+          cancel(provider)
+          pending.delete(provider)
+          written.delete(provider)
+          flips.push({ provider, from: state(file.providers[provider] ?? {}), to: 'unknown' })
+          delete file.providers[provider]
+        }
+        await writeJson(healthPath(userHome), file)
+        return flips
+      }),
+    close: async () => {
+      await withHealthFile(userHome, async (file) => {
+        closed = true
+        for (const provider of timers.keys()) cancel(provider)
+        if (!pending.size) return
+        const flips: Flip[] = []
+        for (const [provider, sample] of pending) {
+          const before = file.providers[provider] ?? {}
+          const after = apply(before, sample)
+          flips.push(healthFlip(provider, before, after))
+          file.providers[provider] = after
+        }
+        await writeJson(healthPath(userHome), file)
+        pending.clear()
+        await announce(flips)
+      })
+    },
+  }
+}
+
+function withHealthFile<T>(userHome: string, work: (file: HealthFile) => Promise<T>) {
   const path = healthPath(userHome)
-  const operation = settled(processWriteQueue.get(path) ?? Promise.resolve()).then(async () => {
-    const file = await readFileHealth(userHome)
-    change(file)
-    await writeJson(path, file)
-    return file
-  })
+  const operation = settled(processWriteQueue.get(path) ?? Promise.resolve()).then(async () =>
+    work(await readFileHealth(userHome)),
+  )
   processWriteQueue.set(path, operation)
   return operation
 }

@@ -1,0 +1,285 @@
+diff --git a/dist/api/openai-responses-shared.js b/dist/api/openai-responses-shared.js
+index 3901bfc4bc6dee0eb45a209dbcbdb59d6c55d054..904638823d01f2f2750fb877147545de902d22c0 100644
+--- a/dist/api/openai-responses-shared.js
++++ b/dist/api/openai-responses-shared.js
+@@ -88,9 +88,119 @@ function renderIncrementalToolsNotice(unavailable) {
+ function renderToolRemovalNotice(names) {
+     return `The following tools are no longer available. Do not call them:\n${names.map((name) => `- ${name}`).join("\n")}`;
+ }
++const responseMessageCache = new WeakMap();
++const frozenResponseItems = new WeakMap();
++const frozenResponseInputs = new WeakSet();
++let responseIsProxy;
++function plainResponseJson(value, ancestors = new Set()) {
++    if (value === null || typeof value !== "object")
++        return value === undefined || ["string", "number", "boolean"].includes(typeof value) || value === null;
++    if (frozenResponseItems.has(value))
++        return true;
++    responseIsProxy ??= globalThis.process?.getBuiltinModule?.("node:util")?.types.isProxy;
++    if (!responseIsProxy || responseIsProxy(value))
++        return false;
++    const prototype = Object.getPrototypeOf(value);
++    if (ancestors.has(value) || JSON.isRawJSON?.(value) || "toJSON" in value ||
++        (Array.isArray(value) ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null))
++        return false;
++    const keys = Reflect.ownKeys(value);
++    if (Array.isArray(value) && (keys.length !== value.length + 1 ||
++        !keys.every((key, index) => key === (index === value.length ? "length" : String(index)))))
++        return false;
++    ancestors.add(value);
++    const valid = keys.every((key) => {
++        const property = Object.getOwnPropertyDescriptor(value, key);
++        return typeof key === "string" && "value" in property && plainResponseJson(property.value, ancestors);
++    });
++    ancestors.delete(value);
++    return valid;
++}
++function freezeResponseJson(value) {
++    if (value !== null && typeof value === "object") {
++        for (const child of Object.values(value))
++            freezeResponseJson(child);
++        Object.freeze(value);
++    }
++    return value;
++}
++function responseRequestShape(params) {
++    if (!params || Object.getPrototypeOf(params) !== Object.prototype || "toJSON" in params || "toJSON" in Array.prototype)
++        return undefined;
++    const keys = Reflect.ownKeys(params);
++    if (keys[0] !== "model" || keys[1] !== "input" ||
++        !keys.every((key) => {
++            const property = Object.getOwnPropertyDescriptor(params, key);
++            return typeof key === "string" && property.enumerable && "value" in property &&
++                (key === "input" || plainResponseJson(property.value));
++        }) || typeof params.model !== "string" || params.stream !== true)
++        return undefined;
++    return keys;
++}
++export function captureFrozenResponsesInput(params) {
++    const keys = responseRequestShape(params);
++    return keys && frozenResponseInputs.has(params.input)
++        ? { params, keys, input: params.input, items: params.input.slice() }
++        : undefined;
++}
++export function encodeFrozenResponsesInput(params, captured) {
++    if (!captured || params !== captured.params)
++        return undefined;
++    const keys = responseRequestShape(params);
++    const input = params.input;
++    if (!keys || keys.length !== captured.keys.length || !keys.every((key, index) => key === captured.keys[index]) ||
++        input !== captured.input || Object.getPrototypeOf(input) !== Array.prototype || "toJSON" in input ||
++        input.length !== captured.items.length || Reflect.ownKeys(input).length !== input.length + 1)
++        return undefined;
++    for (let index = 0; index < input.length; index++) {
++        const property = Object.getOwnPropertyDescriptor(input, String(index));
++        if (!property || !("value" in property) || property.value !== captured.items[index])
++            return undefined;
++    }
++    const parts = [];
++    const envelope = JSON.stringify(params, function (key, value) {
++        if (this === params && key === "input") {
++            for (let index = 0; index < captured.items.length; index++) {
++                const item = captured.items[index];
++                const cached = frozenResponseItems.get(item);
++                cached.encoded ??= JSON.stringify(item);
++                if (parts.length > 0)
++                    parts.push(",");
++                parts.push(cached.encoded);
++            }
++            return [];
++        }
++        return value;
++    });
++    const at = envelope.indexOf('"input":[]') + '"input":['.length;
++    parts.unshift(envelope.slice(0, at));
++    parts.push(envelope.slice(at));
++    return parts.join("");
++}
++const deeplyFrozen = new WeakSet();
++function isDeeplyFrozen(value) {
++    if (value === null || typeof value !== "object" || deeplyFrozen.has(value))
++        return true;
++    if (!Object.isFrozen(value) || !Object.values(value).every(isDeeplyFrozen))
++        return false;
++    deeplyFrozen.add(value);
++    return true;
++}
++function copyResponseItem(value) {
++    if (Array.isArray(value))
++        return value.map(copyResponseItem);
++    if (value !== null && typeof value === "object") {
++        const copy = { ...value };
++        for (const key of Object.keys(copy))
++            copy[key] = copyResponseItem(copy[key]);
++        return copy;
++    }
++    return value;
++}
+ export function convertResponsesMessages(model, context, allowedToolCallProviders, options) {
+     const normalizedContext = resolveTranscript(context, options?.supportsMidConvoSystemMessages);
+     const messages = [];
++    const cachedPositions = options?.cacheFrozenResponseItems ? [] : undefined;
+     const normalizeIdPart = (part) => {
+         const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
+         const normalized = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
+@@ -115,7 +225,13 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+         }
+         return `${normalizedCallId}|${normalizedItemId}`;
+     };
+-    const transformedMessages = transformMessages(normalizedContext.messages, model, normalizeToolCallId);
++    const sources = new WeakMap();
++    const transformedMessages = transformMessages(normalizedContext.messages, model, normalizeToolCallId, sources);
++    const cacheKey = JSON.stringify([
++        model.provider, model.api, model.id, model.input.includes("image"),
++        allowedToolCallProviders.has(model.provider), options?.configurationUpdateEffort !== undefined,
++        [...(options?.grammarToolInputProperties ?? [])],
++    ]);
+     const toolSupport = getResponsesToolSupport(options ?? {});
+     const transcriptTools = resolveTranscriptTools(normalizedContext.messages, toolSupport);
+     let declaredAdditionalTools = false;
+@@ -172,6 +288,19 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+     let systemIndex = 0;
+     for (const msg of transformedMessages) {
+         const isLeadingSystemMessage = sourceIndex++ === 0 && msg.role === "system";
++        const source = sources.get(msg);
++        const cacheable = msg.role !== "system" && source !== undefined && isDeeplyFrozen(source);
++        const cached = cacheable ? responseMessageCache.get(source) : undefined;
++        if (cached?.key === cacheKey && cached.index === msgIndex && cached.toolCallId === msg.toolCallId) {
++            for (const item of cached.items) {
++                if (cachedPositions)
++                    cachedPositions[messages.length] = true;
++                messages.push(cachedPositions ? item : copyResponseItem(item));
++            }
++            msgIndex++;
++            continue;
++        }
++        const start = messages.length;
+         if (msg.role === "system") {
+             // transformMessages keeps system messages in order, so their position matches the transcript.
+             const anchorsToolChanges = systemIndex++ >= transcriptTools.foldedSystemMessages;
+@@ -324,11 +453,37 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+                 });
+             }
+         }
++        if (cacheable) {
++            const items = messages.slice(start);
++            responseMessageCache.set(source, { key: cacheKey, index: msgIndex, toolCallId: msg.toolCallId, items });
++            for (let index = start; index < messages.length; index++) {
++                if (cachedPositions)
++                    cachedPositions[index] = true;
++                else
++                    messages[index] = copyResponseItem(messages[index]);
++            }
++        }
+         if (!isLeadingSystemMessage)
+             msgIndex++;
+     }
+     if (options?.configurationUpdateEffort !== undefined)
+         pushConfigurationUpdate(options.configurationUpdateEffort);
++    if (cachedPositions) {
++        const eligible = messages.every((item) => item !== null && typeof item === "object" && plainResponseJson(item));
++        for (let index = 0; index < messages.length; index++) {
++            if (!eligible) {
++                if (cachedPositions[index])
++                    messages[index] = copyResponseItem(messages[index]);
++            }
++            else if (!frozenResponseItems.has(messages[index])) {
++                const item = cachedPositions[index] ? messages[index] : copyResponseItem(messages[index]);
++                frozenResponseItems.set(freezeResponseJson(item), { encoded: undefined });
++                messages[index] = item;
++            }
++        }
++        if (eligible)
++            frozenResponseInputs.add(messages);
++    }
+     return messages;
+ }
+ // =============================================================================
+diff --git a/dist/api/openai-responses.js b/dist/api/openai-responses.js
+index 0977a46594d2caa8c92b90e267158ee5efb74938..039791f8b7d5f9b66a4aa7f950e1605b531051b8 100644
+--- a/dist/api/openai-responses.js
++++ b/dist/api/openai-responses.js
+@@ -11,5 +11,5 @@ import { createGrammarToolInputProperties } from "./constrained-sampling.js";
+ import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
+ import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.js";
+-import { convertResponsesMessages, convertResponsesTools, getResponsesToolSupport, processResponsesStream, } from "./openai-responses-shared.js";
++import { captureFrozenResponsesInput, convertResponsesMessages, convertResponsesTools, encodeFrozenResponsesInput, getResponsesToolSupport, processResponsesStream, } from "./openai-responses-shared.js";
+ import { buildBaseOptions, resolveSamplingParams } from "./simple-options.js";
+ const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+@@ -139,12 +139,15 @@ export const stream = (model, context, options) => {
+             const client = createClient(model, normalizedContext, apiKey, options?.headers, options?.identity, options?.fetch, cacheSessionId);
+             let params = buildParams(model, normalizedContext, options, compat, grammarToolInputProperties, configurationUpdateEffort);
++            const captured = options?.cacheFrozenResponseItems ? captureFrozenResponsesInput(params) : undefined;
+             const nextParams = await options?.onPayload?.(params, model);
+             if (nextParams !== undefined) {
+                 params = nextParams;
+             }
++            const encoded = captured ? encodeFrozenResponsesInput(params, captured) : undefined;
+             const requestOptions = {
+                 ...(options?.signal ? { signal: options.signal } : {}),
+                 ...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+                 maxRetries: 0,
++                ...(encoded !== undefined ? { body: encoded, headers: { "content-type": "application/json" } } : {}),
+             };
+             const { data: openaiStream, response } = await retryProviderRequest(() => client.responses.create(params, requestOptions).withResponse(), {
+@@ -204,4 +207,5 @@ export const streamSimple = (model, context, options) => {
+         ...base,
+         reasoningEffort,
++        cacheFrozenResponseItems: options?.cacheFrozenResponseItems,
+     });
+ };
+@@ -244,4 +248,5 @@ function buildParams(model, context, options, compat, grammarToolInputProperties
+     const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
+         grammarToolInputProperties,
++        cacheFrozenResponseItems: options?.cacheFrozenResponseItems,
+         supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
+         supportsAdditionalTools: compat.supportsAdditionalTools,
+diff --git a/dist/api/transform-messages.js b/dist/api/transform-messages.js
+index 6a364cbc634759b52af34044e207c6f1cdb29186..14dcab6f944d4fdc616b9a240a6a4a651d017eb4 100644
+--- a/dist/api/transform-messages.js
++++ b/dist/api/transform-messages.js
+@@ -60,7 +60,7 @@ function downgradeUnsupportedImages(messages, model) {
+  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
+  * Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
+  */
+-export function transformMessages(messages, model, normalizeToolCallId) {
++export function transformMessages(messages, model, normalizeToolCallId, sources) {
+     // Build a map of original tool call IDs to normalized IDs
+     const toolCallIdMap = new Map();
+     // Normalize null/undefined content from untyped callers (custom tools, hand-built
+@@ -135,6 +135,10 @@ export function transformMessages(messages, model, normalizeToolCallId) {
+         }
+         return msg;
+     });
++    if (sources) {
++        for (let index = 0; index < transformed.length; index++)
++            sources.set(transformed[index], messages[index]);
++    }
+     // Second pass: insert synthetic empty tool results for orphaned tool calls
+     // This preserves thinking signatures and satisfies API requirements
+     const result = [];
+diff --git a/dist/api/openai-responses-shared.d.ts b/dist/api/openai-responses-shared.d.ts
+index 868ee02f09fb1672eaf492a71d05ad46f2ab15e5..3c20019f3d87c8ff86574e461ff35694d3fd4a24 100644
+--- a/dist/api/openai-responses-shared.d.ts
++++ b/dist/api/openai-responses-shared.d.ts
+@@ -10,6 +10,7 @@ export interface OpenAIResponsesStreamOptions {
+     applyServiceTierPricing?: (usage: Usage, serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined) => void;
+ }
+ export interface ConvertResponsesMessagesOptions {
++    cacheFrozenResponseItems?: boolean;
+     includeSystemPrompt?: boolean;
+     grammarToolInputProperties?: ReadonlyMap<string, string>;
+     /** Whether later system messages are sent in place; otherwise they are folded into the leading prompt. */
+diff --git a/dist/types.d.ts b/dist/types.d.ts
+index b410a7bab16c395090ab63e362288306950dec64..776a203b40ba6e135e1f1a9de4f4602626e446a7 100644
+--- a/dist/types.d.ts
++++ b/dist/types.d.ts
+@@ -105,6 +105,8 @@ export interface ProviderRequestOptions<TModel = Model<Api>> {
+     maxRetryDelayMs?: number;
+ }
+ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
++    /** Opt in to frozen Responses input items and identity-based request encoding. Hooks must replace items, not mutate them. Default: false; openai-responses only. */
++    cacheFrozenResponseItems?: boolean;
+     /**
+      * Optional callback invoked after an HTTP response is received and before
+      * its body stream is consumed.

@@ -3,8 +3,8 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve as resolvePath } from 'node:path'
 import { applyImmutable } from '@earendil-works/chord/delta'
 import type { Op } from '@earendil-works/chord/delta'
-import type { ConversationId, ConversationView } from '@earendil-works/pi-durable'
-import { InboxDoc, LiveDoc } from '@earendil-works/pi-durable'
+import type { ConversationId, ConversationView, TaskGraph } from '@earendil-works/pi-durable'
+import { defineExtension, defineTask, InboxDoc, LiveDoc } from '@earendil-works/pi-durable'
 import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai/providers/faux'
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -681,6 +681,117 @@ export default host => { host.resource('cleanup.process',()=>{
     expect(await readFile(file, 'utf8')).toBe('after\n')
     await stream.close()
   })
+  it('streams batched task operations from a published baseline across connects and reconnects', async () => {
+    const { server } = await fixture()
+    const advance = Promise.withResolvers<void>()
+    const finish = Promise.withResolvers<void>()
+    const task = defineTask<null, { phase: 'first' } | { phase: 'second' }, null>({
+      name: 'sample.task',
+      version: 1,
+      initial: () => ({ phase: 'first' }),
+      phases: {
+        first: async (_task, runtime, ctx) => {
+          await advance.promise
+          await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'second' } }), ctx)
+        },
+        second: async (_task, runtime, ctx) => {
+          await finish.promise
+          await runtime.commit(
+            () => ({ status: 'terminal', outcome: { status: 'completed', result: null } }),
+            ctx,
+          )
+        },
+      },
+      abort: (_task, runtime, ctx) =>
+        runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx),
+    })
+    server.host.registry.install(defineExtension({ name: 'task-fixture', tasks: [task] }))
+    let latest: TaskGraph | undefined
+    const graph = await server.harness.observeTaskGraph(
+      {
+        advance: (call) => {
+          if (call.kind === 'value') latest = call.value
+        },
+        end: () => {},
+      },
+      context,
+    )
+    latest ??= graph.value
+    const streams: Awaited<ReturnType<typeof attach>>[] = []
+    const connect = async () => {
+      const stream = await attach(server, { view: false })
+      streams.push(stream)
+      await until(() => stream.events.some((event) => event.name === 'tasks'))
+      return stream
+    }
+    const materialize = (stream: (typeof streams)[number]) => {
+      let value!: TaskGraph
+      for (const event of stream.events) {
+        if (event.name === 'tasks') value = event.data as TaskGraph
+        if (event.name === 'tasksOps')
+          value = applyImmutable(value, (event.data as ServerEvents['tasksOps']).ops)
+      }
+      return value
+    }
+    try {
+      const first = await connect()
+      const baseline = materialize(first)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const ids = await server.harness.commit(
+        (tx) =>
+          Promise.all(
+            [1, 2].map(() =>
+              tx.createTask(task, null, {
+                conversationId: server.root.id,
+                ownership: { kind: 'conversation' },
+                background: true,
+              }),
+            ),
+          ),
+        context,
+      )
+      await until(() => ids.every((id) => latest!.tasks[id]?.state.status === 'running'))
+      const middle = await connect()
+      expect(materialize(middle)).toEqual(baseline)
+      expect(materialize(middle)).not.toEqual(latest)
+      await vi.advanceTimersByTimeAsync(1000)
+      await until(() => first.events.some((event) => event.name === 'tasksOps'))
+      await until(() => middle.events.some((event) => event.name === 'tasksOps'))
+      expect(materialize(first)).toEqual(latest)
+      expect(materialize(middle)).toEqual(latest)
+      expect(first.events.filter((event) => event.name === 'tasks')).toHaveLength(1)
+      expect(first.events.filter((event) => event.name === 'tasksOps')).toHaveLength(1)
+
+      advance.resolve()
+      await until(() =>
+        ids.every((id) => {
+          const state = latest!.tasks[id]?.state
+          return state?.status === 'running' && state.phase === 'second'
+        }),
+      )
+      await vi.advanceTimersByTimeAsync(1000)
+      await until(() => first.events.filter((event) => event.name === 'tasksOps').length === 2)
+      expect(materialize(first)).toEqual(latest)
+      await middle.close()
+      finish.resolve()
+      await until(() => ids.every((id) => !latest!.tasks[id]))
+      const reconnected = await connect()
+      expect(materialize(reconnected)).toEqual(materialize(first))
+      expect(materialize(reconnected)).not.toEqual(latest)
+      await vi.advanceTimersByTimeAsync(1000)
+      await until(() => reconnected.events.some((event) => event.name === 'tasksOps'))
+      await until(() => first.events.filter((event) => event.name === 'tasksOps').length === 3)
+      expect(materialize(first)).toEqual(latest)
+      expect(materialize(reconnected)).toEqual(latest)
+    } finally {
+      advance.resolve()
+      finish.resolve()
+      vi.useRealTimers()
+      graph.detach()
+      for (const stream of streams) await stream.close()
+    }
+  })
+
   it('persists image-only and mixed inputs and validates image requests', async () => {
     const { server, options } = await fixture()
     const image = { data: 'aGVsbG8=', mimeType: 'image/png' }
@@ -871,7 +982,7 @@ export const actions = { list: async (_args, ctx) => ctx.host.conversations() }`
     await until(() =>
       stream.events.some(
         (event) =>
-          event.name === 'conversations' &&
+          (event.name === 'conversations' || event.name === 'conversationsUpsert') &&
           (event.data as ConversationSummary[]).some(
             (item) => item.id === created && item.answerAt === 2000,
           ),
@@ -912,6 +1023,38 @@ export const actions = { list: async (_args, ctx) => ctx.host.conversations() }`
     for (const event of stream.events)
       if (event.name === 'docOps') value = applyImmutable(value, (event.data as { ops: Op[] }).ops)
     expect(value).toEqual({ count: 1 })
+    await stream.close()
+  })
+  it('updates watched kinds without resending retained documents or the view', async () => {
+    const { server } = await fixture(false, {
+      large: `import { defineDoc, defineExtension } from '@earendil-works/pi-durable'
+export const docs = ['first', 'second', 'third'].map((name, index) => defineDoc({
+  kind: 'test.' + name, checkpointWhen: () => false, version: 1, scope: 'conversation',
+  history: 'latest', fork: 'initial', initial: () => ({ count: 0, text: 'x'.repeat(index === 0 ? 522000 : 426000) })
+}))
+export default defineExtension({ name: 'large' })`,
+    })
+    const stream = await attach(server, { docs: ['test.first', 'test.second'] })
+    const { id } = stream.events.find((event) => event.name === 'stream')!.data as { id: string }
+    const update = (docs: string[]) => post(server, `/api/events/${id}/0`, { docs })
+    const snapshots = () =>
+      stream.events
+        .filter((event) => event.name === 'doc')
+        .map((event) => (event.data as ServerEvents['doc']).kind)
+    await until(() => snapshots().length === 2)
+    expect((await update(['test.first', 'test.second', 'test.third'])).status).toBe(200)
+    await until(() => snapshots().length === 3)
+    expect(snapshots()).toEqual(['test.first', 'test.second', 'test.third'])
+    expect((await update(['test.first', 'test.second'])).status).toBe(200)
+    await server.harness.commit(async (tx) => {
+      ;(await tx.doc(server.extensions.doc('test.first')!, server.root.id)).count = 1
+    }, context)
+    await until(() => stream.events.some((event) => event.name === 'docOps'))
+    expect(snapshots()).toEqual(['test.first', 'test.second', 'test.third'])
+    expect(stream.events.filter((event) => event.name === 'view')).toHaveLength(1)
+    expect(
+      stream.events.filter((event) => event.name === 'docOps').map((event) => event.data),
+    ).toEqual([{ kind: 'test.first', ops: [['s', ['count'], 1]] }])
     await stream.close()
   })
   it("streams a conversation's pi.live alone, without its view", async () => {

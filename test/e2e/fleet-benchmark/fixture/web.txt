@@ -1,0 +1,4 @@
+import { defineWebExtension, getState } from '@/sdk'
+
+Object.assign(window, { fleetState: getState })
+export default defineWebExtension({})

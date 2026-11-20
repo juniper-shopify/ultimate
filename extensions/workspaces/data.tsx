@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { ROOT } from '@/sdk'
 import { useConversations, useDocOf } from '@/sdk'
 import type { ConversationSummary } from '@/sdk'
@@ -13,20 +14,30 @@ const none: WorkspaceIndex = {
   results: {},
 }
 export function useWorkspaces() {
-  return useWorkspaceIndex().items
+  return useDocOf(ROOT, WorkspacesDoc, (index) => index?.items ?? none.items)
+}
+export function useWorkspace(conversation: number | undefined) {
+  return useDocOf(ROOT, WorkspacesDoc, (index) =>
+    conversation === undefined ? undefined : index?.items[String(conversation)],
+  )
 }
 export function useWorkspaceIndex() {
   return useDocOf(ROOT, WorkspacesDoc) ?? none
 }
 export function useLanderQueue() {
-  return useWorkspaceIndex().queue
+  return useDocOf(ROOT, WorkspacesDoc, (index) => index?.queue ?? none.queue)
 }
 export function useWorkspaceConversations(): WorkspaceConversation[] {
   const records = useWorkspaces()
-  return useConversations().map((conversation) => ({
-    ...conversation,
-    workspace: records[String(conversation.id)],
-  }))
+  const conversations = useConversations()
+  return useMemo(
+    () =>
+      conversations.map((conversation) => ({
+        ...conversation,
+        workspace: records[String(conversation.id)],
+      })),
+    [conversations, records],
+  )
 }
 
 export const stateLabel = (workspace: Workspace) =>

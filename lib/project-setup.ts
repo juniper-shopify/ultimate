@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -45,10 +45,34 @@ export function decisionRoot(projectRoot: string) {
   return basename(common) === '.git' ? realpathSync(dirname(common)) : root
 }
 
+const decisions = new Map<
+  string,
+  { identity: string; entry: ReturnType<ProjectTrustStore['getEntry']> }
+>()
+
+function trustIdentity(path: string) {
+  const stat = statSync(path, { bigint: true, throwIfNoEntry: false })
+  if (!stat) return undefined
+  const settled = BigInt(Date.now() - 1000) * 1_000_000n
+  if (stat.mtimeNs > settled || stat.ctimeNs > settled) return undefined
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
+}
+
 function readDecision(projectRoot: string, userHome: string) {
   try {
     const root = decisionRoot(projectRoot)
-    const entry = new ProjectTrustStore(join(userHome, '.ultimate')).getEntry(root)
+    const directory = join(userHome, '.ultimate')
+    const path = join(directory, 'trust.json')
+    const key = `${path}\0${root}`
+    const identity = trustIdentity(path)
+    const cached = decisions.get(key)
+    let entry: ReturnType<ProjectTrustStore['getEntry']>
+    if (identity && cached?.identity === identity) entry = cached.entry
+    else {
+      decisions.delete(key)
+      entry = new ProjectTrustStore(directory).getEntry(root)
+      if (identity && trustIdentity(path) === identity) decisions.set(key, { identity, entry })
+    }
     return { decision: entry?.path === root ? entry.decision : null }
   } catch (error) {
     return { decision: null, error: String(error) }

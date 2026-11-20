@@ -32,6 +32,13 @@ export type SearchOptions = {
   full?: boolean
 }
 
+// Pi upstream: pi-durable's synchronous SQLite page parsing and searchHit's single-record serialization cannot be interrupted; yielding bounds cooperative slices, not these atomic operations.
+export async function yieldTurn(signal?: AbortSignal) {
+  signal?.throwIfAborted()
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  signal?.throwIfAborted()
+}
+
 export function searchHit(entry: EntryRecord, text: string, options: SearchOptions) {
   if (options.kinds && !options.kinds.includes(entry.kind)) return undefined
   const json = JSON.stringify(entry)
@@ -124,9 +131,16 @@ export async function closedChapter(home: string, active: string, options: unkno
   return chapter === active ? undefined : chapterFiles(home, chapter).database
 }
 
-// Pi upstream: @earendil-works/pi-durable@1.5.2 src/storage/sqlite/migrations.ts — conversation/entry JSON records and document revisions; fork cutoffs follow src/storage/sqlite/storage.ts. Drop when Pi's SQLite storage opens over a read-only connection: 1.5.2's readOnly Harness still sets WAL mode, runs migrations and checkpoints the file on close.
-export function readChapter(database: string, op: HistoryRead, args: unknown[]) {
-  const db = new DatabaseSync(database, { readOnly: true })
+// Pi upstream: @earendil-works/pi-durable@1.5.2 src/storage/sqlite/migrations.ts — read-only history queries for workers and closed chapters; fork cutoffs and descending pages follow src/storage/sqlite/storage.ts. Drop when Pi's SQLite storage opens over a read-only connection: 1.5.2's readOnly Harness still sets WAL mode, runs migrations and checkpoints the file on close.
+export async function readChapter(
+  database: string,
+  op: HistoryRead,
+  args: unknown[],
+  signal?: AbortSignal,
+  searchConversations?: readonly { id: ConversationId; before?: EntryId }[],
+) {
+  signal?.throwIfAborted()
+  const db = new DatabaseSync(database, { readOnly: true, timeout: 5000 })
   try {
     const conversations = () =>
       db
@@ -142,12 +156,16 @@ export function readChapter(database: string, op: HistoryRead, args: unknown[]) 
       let record = conversation(value)
       let upper = before === undefined ? Number.MAX_SAFE_INTEGER : before - 1
       while (true) {
-        for (const row of db
+        const rows = db
           .prepare(
-            'SELECT record FROM entries WHERE conversation_id = ? AND id <= ? ORDER BY id DESC',
+            'SELECT id, record FROM entries WHERE conversation_id = ? AND id <= ? ORDER BY id DESC LIMIT 100',
           )
-          .iterate(record.id, upper))
-          yield JSON.parse(String(row.record)) as EntryRecord
+          .all(record.id, upper)
+        for (const row of rows) yield JSON.parse(String(row.record)) as EntryRecord
+        if (rows.length === 100) {
+          upper = Number(rows.at(-1)!.id) - 1
+          continue
+        }
         if (!record.parent) return
         upper = Math.min(upper, record.parent.at)
         record = conversation(record.parent.conversationId)
@@ -204,10 +222,19 @@ export function readChapter(database: string, op: HistoryRead, args: unknown[]) 
       })
     }
     const matches: unknown[] = []
+    let slice = performance.now()
+    const yieldSlice = async () => {
+      signal?.throwIfAborted()
+      if (performance.now() - slice >= 4) {
+        await yieldTurn(signal)
+        slice = performance.now()
+      }
+    }
     if (op === 'entries') {
       const options = (args[1] ?? {}) as EntriesOptions
       const count = limit(options.limit)
       for (const entry of entries(args[0], options.before)) {
+        await yieldSlice()
         if (!options.kinds || options.kinds.includes(entry.kind))
           matches.push(options.full ? entry : compactEntry(entry))
         if (matches.length === count) break
@@ -217,12 +244,14 @@ export function readChapter(database: string, op: HistoryRead, args: unknown[]) 
       if (typeof text !== 'string' || !text) throw new Error('search text must be nonempty')
       const options = (args[1] ?? {}) as SearchOptions
       const count = limit(options.limit)
-      const records =
-        options.conversationId === undefined
+      const records: readonly { id: ConversationId; before?: EntryId }[] =
+        searchConversations ??
+        (options.conversationId === undefined
           ? conversations()
-          : [{ id: id(options.conversationId) }]
+          : [{ id: id(options.conversationId) }])
       for (const record of records) {
-        for (const entry of entries(record.id)) {
+        for (const entry of entries(record.id, record.before)) {
+          await yieldSlice()
           const hit = searchHit(entry, text, options)
           if (hit) matches.push(hit)
           if (matches.length === count) return matches

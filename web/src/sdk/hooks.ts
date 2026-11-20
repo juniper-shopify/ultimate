@@ -44,7 +44,7 @@ import {
 } from './registry.ts'
 import type { State } from './store.ts'
 import { errorMessage, formatDuration } from './format.ts'
-import type { CompactRow, ToolCallView, UltimateContext } from './types.ts'
+import type { CompactDocs, CompactRow, ToolCallView, UltimateContext } from './types.ts'
 import { useViewport } from './viewport.ts'
 import { ConversationIdContext, TranscriptContext } from './conversation-scope.tsx'
 export { TranscriptContext } from './conversation-scope.tsx'
@@ -186,19 +186,35 @@ export function useDocKind(kind: string): Readonly<JsonObject> | null | undefine
 /**
  * The document `ref` names on conversation `conversation`, shown or not, such as the root's; `undefined` while
  * `conversation` is undefined and until its stream delivers it. Every hook on one conversation shares one stream.
+ * With `select`, re-renders only when the selected value changes identity. The selector must return the same value
+ * for the same document; a new object or array on every call makes `useSyncExternalStore` loop.
  */
 export function useDocOf<T>(
   conversation: ConversationId | undefined,
   ref: DocRef<T>,
-): Readonly<T> | null | undefined {
+): Readonly<T> | null | undefined
+export function useDocOf<T, S>(
+  conversation: ConversationId | undefined,
+  ref: DocRef<T>,
+  select: (doc: Readonly<T> | null | undefined) => S,
+): S
+export function useDocOf<T, S>(
+  conversation: ConversationId | undefined,
+  ref: DocRef<T>,
+  select?: (doc: Readonly<T> | null | undefined) => S,
+) {
   const { kind } = ref
   useEffect(
     () => (conversation === undefined ? undefined : store.watchDocOf(conversation, kind)),
     [conversation, kind],
   )
-  return useStore((state) =>
-    conversation === undefined ? undefined : state.docsOf[conversation]?.[kind],
-  ) as Readonly<T> | null | undefined
+  return useStore((state) => {
+    const doc = (conversation === undefined ? undefined : state.docsOf[conversation]?.[kind]) as
+      | Readonly<T>
+      | null
+      | undefined
+    return select ? select(doc) : doc
+  })
 }
 
 const eventFeed = docRef<{ events: EventRecord[] }>(EVENT_FEED)
@@ -348,6 +364,16 @@ export function useCompactThread() {
     return thread && { test: (row: CompactRow) => thread(row, docs), summary: compact.summary }
   }, [compact, docs])
 }
+function compactDocSelector(kinds: string) {
+  const declared = kinds ? kinds.split(',') : []
+  let selected: CompactDocs = noDocs
+  return (state: State) => {
+    const root = state.docsOf[ROOT]
+    if (declared.some((kind) => selected[kind] !== root?.[kind]))
+      selected = Object.fromEntries(declared.map((kind) => [kind, root?.[kind]]))
+    return selected
+  }
+}
 function useCompactConfig() {
   const records = useExtensions()
   const id = useConversation((conversation) => conversation.id)
@@ -357,7 +383,8 @@ function useCompactConfig() {
     const releases = kinds ? kinds.split(',').map((kind) => store.watchDocOf(ROOT, kind)) : []
     return () => releases.forEach((release) => release())
   }, [kinds])
-  const docs = useStore((state) => (kinds ? state.docsOf[1] : undefined)) ?? noDocs
+  const selectDocs = useMemo(() => compactDocSelector(kinds), [kinds])
+  const docs = useStore(selectDocs)
   const compact = useMemo(
     () => compactTools(records, conversation, docs, reportCompact),
     [records, conversation, docs],

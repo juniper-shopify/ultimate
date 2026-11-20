@@ -11,6 +11,7 @@ import {
   hook,
   ROOT_CONVERSATION_ID,
   ToolTask,
+  wrapSection,
 } from '@earendil-works/pi-durable'
 import { arr, obj, opt, str, union } from '@earendil-works/pi-schema'
 import { UiState } from '../../shared/ui-state.ts'
@@ -707,6 +708,18 @@ export default (host: ExtensionHost) =>
     name: 'side-chat',
     tasks: [Start, endTask(host)],
     tools: [draftAnswersTool(host)],
+    wraps: [
+      wrapSection('automations', (section) => ({
+        ...section,
+        render: async (api, ctx) => {
+          const side = await api.read.snapshot(Side, api.conversationId, ctx)
+          return section.render(
+            side?.of === undefined ? api : { ...api, conversationId: side.of },
+            ctx,
+          )
+        },
+      })),
+    ],
     hooks: [
       hook(GenerationTask, {
         beforeInput: async (_input, { tx, conversationId }) => {

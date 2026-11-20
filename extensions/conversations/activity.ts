@@ -1,8 +1,9 @@
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context'
 import { onCommit } from '../../lib/commits.ts'
-import type { ConversationId, Cursor } from '@earendil-works/pi-durable'
+import type { ConversationId, Cursor, EntryRecord } from '@earendil-works/pi-durable'
 import { isInput } from '../../lib/entries.ts'
 import type { ExtensionHost } from '../../server/extensions.ts'
+import { activityCheckpoint, BackfillDoc } from './backfill.ts'
 
 export function activityBehavior(
   host: Pick<ExtensionHost, 'harness' | 'metadata' | 'onOpen' | 'onClose' | 'notice'>,
@@ -10,11 +11,30 @@ export function activityBehavior(
   let stop: (() => void) | undefined
   let closed = false
   let draining: Promise<void> | undefined
-  const pending = new Set<ConversationId>()
-  const reconcile = async (id: ConversationId) => {
+  let checkpointsReady = false
+  const dirty = new Set<ConversationId>()
+  const pending = new Map<ConversationId, EntryRecord | undefined>()
+  const reconcile = async (id: ConversationId, assistant?: EntryRecord) => {
+    const message = assistant?.model?.[0]
+    if (assistant && message?.role === 'assistant' && typeof message.timestamp === 'number') {
+      await host.harness().commit(async (tx) => {
+        if (pending.has(id) || !(await tx.conversation(id))) return
+        const metadata = await tx.doc(host.metadata, id)
+        const checkpoint = await tx.doc(BackfillDoc, id)
+        const current =
+          checkpoint.activity === activityCheckpoint(checkpoint.activityTail ?? 0, metadata)
+        if (metadata.answerAt !== message.timestamp) metadata.answerAt = message.timestamp
+        if (checkpointsReady && !dirty.has(id) && current) {
+          checkpoint.activityTail = assistant.id
+          checkpoint.activity = activityCheckpoint(assistant.id, metadata)
+        }
+      }, context)
+      return
+    }
     const conversation = await host.harness().conversation(id, context)
     if (!conversation) return
     const { entries } = await conversation.context(context)
+    const tail = entries.reduce((at, entry) => Math.max(at, entry.id), 0)
     const input = entries.find(isInput)?.model?.[0]
     const title =
       input?.role === 'user'
@@ -44,13 +64,16 @@ export function activityBehavior(
     const inheritedInputIsOlder =
       previous?.inputAt !== undefined && (inputAt === undefined || inputAt < previous.inputAt)
     if (inheritedInputIsOlder) inputAt = previous.inputAt
-    if (
-      previous?.inputTitle === inputTitle &&
-      previous?.inputAt === inputAt &&
-      previous?.answerAt === answerAt
-    )
-      return
     await host.harness().commit(async (tx) => {
+      const checkpoint = await tx.doc(BackfillDoc, id)
+      checkpoint.activityTail = tail
+      checkpoint.activity = activityCheckpoint(tail, { inputTitle, inputAt, answerAt })
+      if (
+        previous?.inputTitle === inputTitle &&
+        previous?.inputAt === inputAt &&
+        previous?.answerAt === answerAt
+      )
+        return
       const metadata = await tx.doc(host.metadata, id)
       if (inputTitle !== undefined) metadata.inputTitle = inputTitle
       else delete metadata.inputTitle
@@ -59,6 +82,7 @@ export function activityBehavior(
       if (answerAt !== undefined) metadata.answerAt = answerAt
       else delete metadata.answerAt
     }, context)
+    if (!pending.has(id) || pending.get(id) !== undefined) dirty.delete(id)
   }
   const schedule = () => {
     if (draining || closed) return
@@ -67,7 +91,7 @@ export function activityBehavior(
         if (closed) break
         const ids = [...pending]
         pending.clear()
-        for (const id of ids) await reconcile(id)
+        for (const [id, assistant] of ids) await reconcile(id, assistant)
       }
     })()
       .catch((error: unknown) => {
@@ -80,32 +104,67 @@ export function activityBehavior(
   }
   host.onOpen(async () => {
     closed = false
+    checkpointsReady = false
     stop = onCommit(host.harness(), (publication) => {
+      let candidates: Map<ConversationId, EntryRecord | undefined> | undefined
+      let full: Set<ConversationId> | undefined
       for (const change of publication.changes) {
-        if (change.type === 'conversation') pending.add(change.value.id)
-        if (
-          change.type === 'entry' &&
-          (isInput(change.value) ||
-            change.value.model?.[0]?.role === 'assistant' ||
-            change.value.head !== undefined)
-        )
-          pending.add(change.value.conversationId)
+        if (change.type === 'conversation') (full ??= new Set()).add(change.value.id)
+        if (change.type !== 'entry') continue
+        const entry = change.value
+        if (isInput(entry) || entry.head !== undefined)
+          (full ??= new Set()).add(entry.conversationId)
+        if (entry.model?.[0]?.role !== 'assistant') continue
+        if (entry.kind !== 'pi.assistant' || typeof entry.model[0].timestamp !== 'number')
+          (full ??= new Set()).add(entry.conversationId)
+        candidates ??= new Map()
+        const previous = candidates.get(entry.conversationId)
+        if (!previous || entry.id > previous.id) candidates.set(entry.conversationId, entry)
+      }
+      if (full) {
+        candidates ??= new Map()
+        for (const id of full) {
+          dirty.add(id)
+          candidates.set(id, undefined)
+        }
+      }
+      if (!candidates) return
+      for (const [id, assistant] of candidates) {
+        if (pending.has(id) && pending.get(id) === undefined) continue
+        const previous = pending.get(id)
+        pending.set(id, assistant && previous && previous.id > assistant.id ? previous : assistant)
       }
       if (pending.size) schedule()
     })
-    await host.harness().commit(async (tx) => {
-      let cursor: Cursor | undefined
-      do {
-        const page = await tx.scanConversations({}, 256, cursor)
-        for (const own of page.items) pending.add(own.id)
-        cursor = page.next
-      } while (cursor !== undefined)
-    }, context)
+    let cursor: Cursor | undefined
+    do {
+      const harness = host.harness()
+      const page = await harness.commit(async (tx) => {
+        const conversations = await tx.scanConversations({}, 256, cursor)
+        const items = []
+        for (const own of conversations.items)
+          items.push({ id: own.id, tail: (await tx.latestEntryId(own.id)) ?? 0 })
+        return { items, next: conversations.next }
+      }, context)
+      for (const own of page.items) {
+        const [metadata, checkpoint] = await Promise.all([
+          harness.snapshot(host.metadata, own.id, context),
+          harness.snapshot(BackfillDoc, own.id, context),
+        ])
+        if (checkpoint?.activity !== activityCheckpoint(own.tail, metadata ?? {})) {
+          dirty.add(own.id)
+          pending.set(own.id, undefined)
+        }
+      }
+      cursor = page.next
+    } while (cursor !== undefined)
     schedule()
     await draining
+    checkpointsReady = true
   })
   host.onClose(async () => {
     closed = true
+    checkpointsReady = false
     stop?.()
     await draining
   })

@@ -1,7 +1,7 @@
 import type { ConversationId } from '@earendil-works/pi-durable'
 import { ROOT } from '@/sdk'
 import type { ReactNode } from 'react'
-import { useRef, useState } from 'react'
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   cn,
   formatAgo,
@@ -63,35 +63,17 @@ export function inFlight(
   return landed === undefined || (conversation.inputAt ?? 0) > landed
 }
 
-function useBranchState(
-  conversation: ConversationSummary,
-  working: boolean,
-  phase: { word: string; waiting: boolean } | undefined,
-  previewUp: boolean | undefined,
-  parked = false,
-) {
+function useBranchStates() {
   const conversations = useConversations()
   const runs = useDocOf(ROOT, RunsDoc)
   const index = useWorkspaceIndex()
   const log = useDocOf(ROOT, MessagesDoc) ?? emptyMessages
   const overview = useOverview()
-  const runState = overview[conversation.id]?.runState
   const standing = useDocOf(ROOT, StandingDoc)
   const primary = standing?.ultimate
   const timers = timerWaits(useAutomations(5000).data, standing)
-  const concludedSince = useConcludedSince()(conversation.id)
-  const starter = useStarters()(conversation.id)
+  const concludedSince = useConcludedSince()
   const underway = useUnderway()
-  const queued = index.queue.find((item) => item.conversationId === conversation.id)
-  const facts = {
-    id: conversation.id,
-    kind: 'other' as const,
-    runState,
-    busy: working || underway(conversation.id),
-    starter,
-    concludedSince,
-  }
-  const state = conversationState(facts, log, timers)
   const primaryWait =
     primary === undefined
       ? undefined
@@ -105,33 +87,47 @@ function useBranchState(
           log,
           timers,
         )
-  const wait = conversationWait(facts, log, timers)
-  const remoteWait = wait?.on === 'remote' ? wait : primaryWait
-  const remote = useRemoteProgress(remoteWait?.on === 'remote' ? remoteWait.project : undefined)
-  const label = waitLabel(wait, primary, primaryWait, remote.data)
-  if (queued?.state === 'landing') return { label: 'landing', tone: 'success' } as const
-  if (queued) return { label: 'submitted', tone: 'success' } as const
-  if (parked) return { label: 'paused', tone: 'paused' } as const
-  if (state === 'working') {
-    const reviewing = conversations.some((child) => {
-      if (
-        child.parentConversationId !== conversation.id ||
-        child.ownerTaskId === undefined ||
-        !child.busy
-      )
-        return false
-      const agent = runs?.[String(child.id)]?.agent
-      return agent === 'reviewer' || agent?.startsWith('reviewer-')
+  return (conversation: ConversationSummary, working: boolean, parked = false) => {
+    const queued = index.queue.find((item) => item.conversationId === conversation.id)
+    const facts = {
+      id: conversation.id,
+      kind: 'other' as const,
+      runState: overview[conversation.id]?.runState,
+      busy: working || underway(conversation.id),
+      concludedSince: concludedSince(conversation.id),
+    }
+    const state = conversationState(facts, log, timers)
+    const wait = conversationWait(facts, log, timers)
+    const result = (label: string, tone: keyof typeof tones) => ({
+      label,
+      tone,
+      wait,
+      primary,
+      primaryWait,
+      feature: overview[conversation.id]?.feature,
+      concluded: facts.concludedSince === Infinity,
     })
-    if (reviewing) return { label: 'reviewing', tone: 'brand' } as const
-    return { label: phase && !phase.waiting ? phase.word : 'working', tone: 'brand' } as const
+    if (queued?.state === 'landing') return result('landing', 'success')
+    if (queued) return result('submitted', 'success')
+    if (parked) return result('paused', 'paused')
+    if (state === 'working') {
+      const reviewing = conversations.some((child) => {
+        if (
+          child.parentConversationId !== conversation.id ||
+          child.ownerTaskId === undefined ||
+          !child.busy
+        )
+          return false
+        const agent = runs?.[String(child.id)]?.agent
+        return agent === 'reviewer' || agent?.startsWith('reviewer-')
+      })
+      return result(reviewing ? 'reviewing' : 'working', 'brand')
+    }
+    if (state === 'waits') return result('waits on you', 'waiting')
+    if (state === 'awaiting') return result(waitLabel(wait, primary, primaryWait)!, 'awaiting')
+    if (state === 'failed') return result('failed', 'failed')
+    return result('idle', 'quiet')
   }
-  if (state === 'waits')
-    return { label: previewUp ? 'preview awaits you' : 'waits on you', tone: 'waiting' } as const
-  if (state === 'awaiting') return { label: label!, tone: 'awaiting' } as const
-  if (state === 'failed') return { label: 'failed', tone: 'failed' } as const
-  if (previewUp) return { label: 'preview up', tone: 'awaiting' } as const
-  return { label: 'idle', tone: 'quiet' } as const
 }
 
 const tones = {
@@ -157,12 +153,11 @@ const dotStatusByTone = {
 type FlightProps = {
   conversation: ConversationSummary
   working: boolean
-  parked?: boolean
   shown: boolean
   now: number
   work?: Work
-  children?: ReactNode
-  onConclude: (conclude: boolean) => void
+  status: ReturnType<ReturnType<typeof useBranchStates>>
+  onConclude: (id: number, conclude: boolean) => void
 }
 
 function Edits({ count, spec }: { count: number; spec: string }) {
@@ -189,37 +184,92 @@ function Edits({ count, spec }: { count: number; spec: string }) {
 
 function FlightRow(props: FlightProps) {
   return (
-    <Provided input={props.working ? props.conversation.id : undefined} point={ConversationPhase}>
-      {(phase) => (
-        <Provided input={props.conversation.id} point={PreviewUp}>
-          {(previewUp) => <PhasedFlightRow {...props} phase={phase} previewUp={previewUp} />}
-        </Provided>
-      )}
+    <Provided input={props.conversation.id} point={PreviewUp}>
+      {(previewUp) => <MemoPhasedFlightRow {...props} previewUp={previewUp} />}
     </Provided>
   )
 }
 
+function sameFields<T extends object>(a: T | undefined, b: T | undefined) {
+  if (a === b) return true
+  if (!a || !b) return false
+  const keys = Object.keys(a) as (keyof T)[]
+  return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key])
+}
+
+const MemoFlightRow = memo(
+  FlightRow,
+  (a, b) =>
+    sameFields(a.conversation, b.conversation) &&
+    a.working === b.working &&
+    a.shown === b.shown &&
+    a.now === b.now &&
+    a.onConclude === b.onConclude &&
+    a.status.label === b.status.label &&
+    a.status.tone === b.status.tone &&
+    a.status.feature === b.status.feature &&
+    a.status.concluded === b.status.concluded &&
+    a.status.primary === b.status.primary &&
+    sameFields(a.status.wait, b.status.wait) &&
+    sameFields(a.status.primaryWait, b.status.primaryWait) &&
+    sameFields(a.work?.commits, b.work?.commits) &&
+    sameFields(a.work?.edits, b.work?.edits),
+)
+
 function PhasedFlightRow({
   conversation,
   working,
-  parked,
   shown,
   now,
   work,
-  children,
   onConclude,
-  phase,
+  status,
   previewUp,
-}: FlightProps & { phase?: { word: string; waiting: boolean }; previewUp?: boolean }) {
+}: FlightProps & { previewUp?: boolean }) {
   const actions = useShell()
   const [editing, setEditing] = useState(false)
   const cancelled = useRef(false)
-  const feature = useOverview()[conversation.id]?.feature
-  const state = useBranchState(conversation, working, phase, previewUp, parked)
+  const feature = status.feature
+  const starter = useStarters(conversation.branchOf && !status.concluded ? [conversation.id] : [])(
+    conversation.id,
+  )
+  const wait =
+    status.wait ??
+    (starter === null
+      ? { on: 'loading' as const }
+      : starter !== undefined && !status.concluded
+        ? { on: 'starter' as const, to: starter }
+        : undefined)
+  const base =
+    status.tone === 'quiet' && wait
+      ? {
+          ...status,
+          label: waitLabel(wait, status.primary, status.primaryWait)!,
+          tone: 'awaiting' as const,
+        }
+      : status
+  const state =
+    previewUp && base.tone === 'waiting'
+      ? { ...base, label: 'preview awaits you' }
+      : previewUp && base.tone === 'quiet'
+        ? { ...base, label: 'preview up', tone: 'awaiting' as const }
+        : base
+  const remoteWait = wait?.on === 'remote' ? wait : status.primaryWait
+  const remote = useRemoteProgress(remoteWait?.on === 'remote' ? remoteWait.project : undefined)
+  const label =
+    state.tone === 'awaiting'
+      ? (waitLabel(wait, status.primary, status.primaryWait, remote.data) ?? state.label)
+      : state.label
+  const statusLine = (word: string) => (
+    <span className={cn('min-w-0 truncate', tones[state.tone])} title={word}>
+      {word}
+    </span>
+  )
   const latest = Math.max(conversation.inputAt ?? 0, conversation.answerAt ?? 0)
+  const age = useMemo(() => (latest > 0 ? formatAgo(latest, now) : undefined), [latest, now])
   const title = conversation.title ?? `#${conversation.id}`
   return (
-    <li>
+    <>
       <div className="group relative">
         {editing && (
           <input
@@ -282,13 +332,15 @@ function PhasedFlightRow({
             </span>
             <span className="flex w-full min-w-0 items-center gap-1.5 pl-3 font-mono text-[10px] leading-4 text-muted-foreground">
               {feature && <FeatureTag className="max-w-[35%] shrink-0" feature={feature} />}
-              <span className={cn('min-w-0 truncate', tones[state.tone])} title={state.label}>
-                {state.label}
-              </span>
+              {state.label === 'working' && working ? (
+                <Provided input={conversation.id} point={ConversationPhase}>
+                  {(phase) => statusLine(phase && !phase.waiting ? phase.word : 'working')}
+                </Provided>
+              ) : (
+                statusLine(label)
+              )}
               {latest > 0 && (
-                <span className="ml-auto shrink-0 pl-1 text-muted-foreground/60">
-                  {formatAgo(latest, now)}
-                </span>
+                <span className="ml-auto shrink-0 pl-1 text-muted-foreground/60">{age}</span>
               )}
             </span>
           </button>
@@ -298,7 +350,7 @@ function PhasedFlightRow({
             <RowMenu
               concluded={false}
               conversation={conversation}
-              onConclude={onConclude}
+              onConclude={(conclude) => onConclude(conversation.id, conclude)}
               onRename={() => {
                 cancelled.current = false
                 setEditing(true)
@@ -316,10 +368,10 @@ function PhasedFlightRow({
           {work.edits && <Edits count={work.edits.count} spec={work.edits.spec} />}
         </span>
       )}
-      {children}
-    </li>
+    </>
   )
 }
+const MemoPhasedFlightRow = memo(PhasedFlightRow)
 
 function useFlightWork(branches: ConversationSummary[]) {
   const readyWorktreeIds = branches
@@ -370,38 +422,62 @@ export const stillOpen = (
       (event.at ?? 0) >= (flight.conversation.inputAt ?? 0),
   )
 
-export function InFlight({
-  flights,
-  shownId,
-  now,
-  onConclude,
-}: {
+type FlightsProps = {
   flights: Flight[]
   shownId?: number
   now: number
   onConclude: (id: number, conclude: boolean) => void
-}) {
+}
+
+export function InFlight({ flights, shownId, now, onConclude }: FlightsProps) {
   const work = useFlightWork(flights.map((flight) => flight.conversation))
   if (!flights.length) return null
   return (
     <Section count={flights.length} id="in-flight" label="In flight">
-      <ul className="flex flex-col gap-0.5">
-        {flights.map((flight) => (
-          <FlightRow
-            conversation={flight.conversation}
-            key={flight.conversation.id}
-            now={now}
-            onConclude={(conclude) => onConclude(flight.conversation.id, conclude)}
-            parked={flight.parked}
-            shown={flight.conversation.id === shownId}
-            work={work.get(flight.conversation.id)}
-            working={flight.working}
-          >
-            {flight.subagents}
-          </FlightRow>
-        ))}
-      </ul>
+      <FlightRows
+        flights={flights}
+        shownId={shownId}
+        now={now}
+        onConclude={onConclude}
+        work={work}
+      />
     </Section>
+  )
+}
+
+function FlightRows({
+  flights,
+  shownId,
+  now,
+  onConclude,
+  work,
+}: FlightsProps & { work: ReturnType<typeof useFlightWork> }) {
+  const stateOf = useBranchStates()
+  const conclude = useRef(onConclude)
+  useLayoutEffect(() => {
+    conclude.current = onConclude
+  }, [onConclude])
+  const requestConclude = useCallback(
+    (id: number, value: boolean) => conclude.current(id, value),
+    [],
+  )
+  return (
+    <ul className="flex flex-col gap-0.5">
+      {flights.map((flight) => (
+        <li key={flight.conversation.id}>
+          <MemoFlightRow
+            conversation={flight.conversation}
+            working={flight.working}
+            shown={flight.conversation.id === shownId}
+            now={now}
+            work={work.get(flight.conversation.id)}
+            status={stateOf(flight.conversation, flight.working, flight.parked)}
+            onConclude={requestConclude}
+          />
+          {flight.subagents}
+        </li>
+      ))}
+    </ul>
   )
 }
 

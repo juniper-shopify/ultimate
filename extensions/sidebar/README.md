@@ -71,8 +71,11 @@ section of the `sidebar.top` slot draws the same heading. Top to bottom:
   a landed branch that gets new work is open again). Each shows its title, its feature tag, a state (`submitted` or
   `landing` while the lander has it, the working phase while it works, brand-colored `waits on <target>` for an
   agent, remote, timer or starter dependency, amber `waits on you`, red `failed`, else `idle`) and its age; clicking opens it, and its `…` menu is the same as an Earlier row's (Rename, Compact
-  context, Conclude with the pending-work check). A branch
-  with a worktree also shows its work so far on a quiet line below (workspaces' `progress`): `N commits` not yet on
+  context, Conclude with the pending-work check). Shared branch status is derived once for the list; an unchanged
+  row header skips unrelated status renders. Starter documents remain row-scoped, and a phase provider mounts only
+  inside a working label, so status transitions do not remount editing controls. A branch retains its formatted age
+  until its latest timestamp or the sidebar's minute clock changes; unrelated status updates do not reformat it.
+  A branch with a worktree also shows its work so far on a quiet line below (workspaces' `progress`): `N commits` not yet on
   its target, opening `branch:<name>` in Review, and `+ N edits` (uncommitted changed paths), opening
   `uncommitted:<id>`. A fresh worktree, or a branch without one, shows nothing. All rows are read in one call, again
   only when an agent commits (`coding-tools.committed`), a worktree's state changes or a branch's run starts or ends;
@@ -80,7 +83,15 @@ section of the `sidebar.top` slot draws the same heading. Top to bottom:
   `E1 · <title>` comes first (`EpicLine`, `rows.tsx`, from plan's `conversations.epic` point): its dot pulses while
   the coordinator runs, it reads `idle` between runs and `done` with a check once the epic is, and a click opens the
   epic in the plan panel. Its subagents follow, one line each at any depth (`SubagentLine`, `rows.tsx`): their mark, plan
-  chip, role and `#id`, and their state word, with the latest activity or plan task on hover.
+  chip, role and `#id`, and their state word, with the latest activity or plan task on hover. Only the viewport's
+  subagent lines and six rows of overscan on each side mount, with spacers preserving their scroll positions.
+  `SubagentLine` in `rows.tsx` and the spacers share `subagentLineHeightRem` from `subagent-window.tsx` (1.75 rem),
+  so changing the row height also changes the window geometry.
+  The first, last, selected and focused lines remain mounted; forward Tab visits every subagent and its task chip in order.
+  Shift+Tab keeps its existing global shortcut behavior, not backward focus traversal. Selecting a child scrolls it into
+  view once; later row-list changes do not pull a user back to the selection. List items expose their full-set position
+  and count even though browse mode reaches only mounted content. This window applies only to the in-flight subtree,
+  not Earlier, Concluded or their nested expanders.
 
 Landed branches and older conversations that are neither roots nor branches live in the collapsed "Earlier · N" group,
 above "Concluded · N". There, branches nest under their source (`branchOf.conversationId`), with a hairline guide
@@ -90,7 +101,11 @@ subagents is shown. Each row has its title (or `#id` for shared rows, `Untitled 
 and the time of its latest message (`now`, `5m`, `3h`, `2d`,
 then a date). Its leading mark pulses while it or any of its subagents works, and is solid when an answer arrived
 since you last looked at it. Actual foreground tasks and live run boundaries determine Working, not the potentially
-lagging title/timestamp list.
+lagging title/timestamp list. The sidebar indexes parent and branch edges per input revision; owned subagents,
+branch ordering and concluded propagation keep their separate ancestry rules.
+Plain rows retain their rendered content while their conversation and display facts are unchanged; unrelated status
+updates, insertions and reorders do not rebuild those rows. Selection, clock and relevant provider changes still refresh
+them. Non-branch rows do not mount starter-document hooks.
 A solid purple dot means an unread reply, not ongoing work; only the pulsing dot means working.
 
 Every row reads one state from messages’ `conversationState`, the same the System surface shows: working;
@@ -98,7 +113,11 @@ Every row reads one state from messages’ `conversationState`, the same the Sys
 **waits on <target>** (brand-colored, never on a subagent: an open agent or remote request, an enabled timer with
 its next fire time, or an unconcluded branch's starter). The primary is named `@ultimate`, other conversations `#N`;
 when @ultimate itself waits on a remote, its waiting branch shows `waits on @ultimate → <project>` (one hop).
-Every row reads the recorded `board.started` starter, and counts busy subagents and a queued landing as working
+Concluded branches do not watch `board.started`, even when their history rows are expanded: their wait state never
+uses a starter. Other sidebar rows request starters only while mounted; the composer's open-message count independently
+keeps unconcluded branches watched even when hidden here. A row awaiting its starter document says `loading…` in the
+awaiting style, not `idle`; it stays there while a failed stream retries, briefly taking priority over `preview up`.
+Every row counts busy subagents and a queued landing as working
 (`useUnderway`), so a working tree never reads as waiting. Labels truncate with
 the full text on hover. Truly idle conversations still say `idle`; **done** (green check, subagents only: it answered, and its answer went to its parent);
 **failed** (red cross: its latest input ended unanswered); else idle. Working includes queued input. Standing rows,

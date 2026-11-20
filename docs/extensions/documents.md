@@ -38,6 +38,29 @@ every exported kind, which creates a missing document with its initial value, as
 Extensions read documents through the SDK (`useDoc`, `useDocOf`; see [contracts](contracts.md)), never the stream
 itself. Their `doc` snapshots and `docOps` batches come from `/api/events`. A browser tab keeps one such stream; its
 first event, `stream`, carries the id with which `POST /api/events/<stream>/<sub>` (`{ conversation?, docs?, view? }`)
-subscribes to a conversation and `DELETE` ends that (`ServerEvents` in `shared/protocol.ts`). A subscription's
+subscribes to a conversation and `DELETE` ends that (`ServerEvents` in `shared/protocol.ts`). Posting again updates
+that subscription's kinds and view requirement, snapshotting only added watches; `useDoc`, `useDocOf` and
+`ConversationScope` share these updates without restarting retained watches. Kind changes and released-document
+cleanup are batched until the next turn; main-document events keep updating their replicas until that sync removes
+the kind. Showing another conversation or opening a new stream subscribes in full. A subscription's
 `view`, `ops`, `doc` and `docOps` events carry its id on their first data line, so their `data` reads `<sub>\n{…}`:
 parse what follows the first newline.
+
+The global task graph follows the same snapshot/ops pattern without a subscription id: `tasks` sends the last
+published graph once per connection, then `tasksOps` carries `{ ops }` folded over each broadcast window. A connection
+opened during a window starts from that published baseline, not the newer graph those pending ops already include.
+The browser applies ops immutably; reconnecting replaces its graph from a fresh snapshot before applying further ops.
+An overflowing pending-ops queue sends a root replacement in `tasksOps`, as document operations can.
+
+Document-only subscription requests use a four-wide background lane (`backgroundSubscriptionRequestLimit` in the
+browser store). With a typical six-connection HTTP/1.1 browser and one EventSource, four background requests leave
+one slot for interaction when no other request occupies it. If other requests take the reserve, the lane still
+bounds the browser's queue to a few background requests, not hundreds; it cannot bound the time a server takes to
+answer one. Main/view subscriptions, reserved-root documents and documents of the shown conversation bypass the
+lane; queued documents are promoted when shown. Click-opened documents for other conversations remain background.
+Background creates and DELETEs drain FIFO; a DELETE may wait behind prior creates while the server keeps watching.
+There is no new timeout: one hung request occupies one lane slot until close or reconnect; four can stop background
+progress. Previously one hung request occupied one of the browser's request slots while the others kept working.
+Closing a queued subscription sends nothing; reconnect aborts the old lane and subscribes in full. The lane does
+not fix unrelated slow actions or prioritize requests already handed to the browser. It adds no server capability
+or endpoint and uses the existing single-subscription POST/DELETE contract.
