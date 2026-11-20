@@ -2,6 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { TaskGraph } from '@earendil-works/pi-durable'
+import { copyJson } from '@earendil-works/chord/json'
+import type { Op } from '@earendil-works/chord/delta'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { createApi, Events } from '../server/api.ts'
 import type { ConversationSummary } from '../shared/protocol.ts'
@@ -17,7 +19,7 @@ async function fixture() {
   ])
   const state: { block?: Promise<void>; reads: number } = { reads: 0 }
   let commit!: (publication: { changes: unknown[] }) => void
-  let graphChanged!: (call: { kind: 'value'; value: TaskGraph }) => void
+  let graphChanged!: (call: { kind: 'value'; value: TaskGraph; ops: readonly Op[] }) => void
   const harness = {
     observeTaskGraph: async (observer: { advance: typeof graphChanged }) => {
       graphChanged = observer.advance
@@ -62,7 +64,8 @@ async function fixture() {
       commit({
         changes: [{ type: 'document', conversationId: id, record: { kind: 'ultimate.metadata' } }],
       }),
-    graphChanged: (value: TaskGraph) => graphChanged({ kind: 'value', value }),
+    graphChanged: (value: TaskGraph) =>
+      graphChanged({ kind: 'value', value, ops: [['r', copyJson(value)]] }),
     close: async () => {
       await api.close()
       await rm(home, { recursive: true, force: true })

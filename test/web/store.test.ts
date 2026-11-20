@@ -1,5 +1,6 @@
-import type { ConversationView, ConversationId } from '@earendil-works/pi-durable'
+import type { ConversationView, ConversationId, TaskGraph } from '@earendil-works/pi-durable'
 import type { Op } from '@earendil-works/chord/delta'
+import { parseConversationId, parseTaskId } from '../../lib/ids.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createStore } from '../../web/src/sdk/store.ts'
 import type { ServerEvents } from '../../shared/protocol.ts'
@@ -96,6 +97,51 @@ describe('web replica store', () => {
     expect(store.getState().view!.entries.map((entry) => entry.id)).toEqual([1, 3, 4])
     expect(store.getState().view!.docs).toEqual({})
     expect(store.getState().connection.status).toBe('open')
+    store.stop()
+  })
+
+  it('applies task operations with shared untouched nodes and resets to the reconnect snapshot', () => {
+    const { store, latest } = setup()
+    const source = latest()
+    source.open()
+    const node = (id: number) =>
+      ({
+        id: parseTaskId(id),
+        kind: 'sample',
+        conversationId: parseConversationId(1),
+        background: false,
+        abortRequested: false,
+        state: { status: 'running', phase: 'first' },
+        conversations: [],
+      }) satisfies TaskGraph['tasks'][string]
+    const snapshot: TaskGraph = { tasks: { 1: node(1), 2: node(2) } }
+    source.send('tasks', snapshot)
+    const before = store.getState().tasks!
+    source.send('tasksOps', {
+      ops: [
+        ['s', ['tasks', '3'], node(3)],
+        ['s', ['tasks', '1', 'state', 'phase'], 'second'],
+        ['p', ['tasks', '1', 'conversations'], 0, 0, [7]],
+      ],
+    })
+    expect(store.getState().tasks).toEqual({
+      tasks: {
+        1: { ...node(1), state: { status: 'running', phase: 'second' }, conversations: [7] },
+        2: node(2),
+        3: node(3),
+      },
+    })
+    expect(store.getState().tasks!.tasks[2]).toBe(before.tasks[2])
+    expect(before).toEqual(snapshot)
+    source.send('tasksOps', { ops: [['d', ['tasks', '3']]] })
+    expect(Object.keys(store.getState().tasks!.tasks)).toEqual(['1', '2'])
+
+    source.drop()
+    source.open()
+    source.send('tasks', snapshot)
+    expect(store.getState().tasks).toEqual(snapshot)
+    source.send('tasksOps', { ops: [['p', ['tasks', '1', 'conversations'], 0, 0, [8]]] })
+    expect(store.getState().tasks!.tasks[1].conversations).toEqual([8])
     store.stop()
   })
 
