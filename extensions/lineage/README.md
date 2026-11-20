@@ -38,7 +38,8 @@ documents, tools and model-facing text.
 - **Catch-up on resume.** When an idle conversation gets input, a "Meanwhile in #R's tree" note goes in before it: new
   or updated abstracts, prompts without one, landings with divergence and breadcrumbs, notes, and any tally compaction,
   excluding its own activity. Within about 6000 tokens the newest stay in full and older ones collapse to one line.
-  The note also lists up to 30 new target commits, overlaps first, with conversation trailers and an isolate's behind
+  Except for the standing `ultimate` agent, the note also counts new first-parent target commits and lists the latest
+  30, newest first, with conversation trailers. It does not inspect workspace changes, mark overlaps or give a behind
   count. Nothing new means no note; mid-run inputs and tallies get none. `lineage.seen` `{ main?, at?, tally? }` keeps
   the baseline.
 - **Prompt.** Branches are told their origin, intent, tree root and inherited tally (or, with a brief, the memory index
