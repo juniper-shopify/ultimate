@@ -40,7 +40,15 @@ import type { ActionContext } from '../../server/actions.ts'
 import { READS, readProject } from './projects.ts'
 import { REMOTE_BYTES } from '../../lib/remote.ts'
 import type { Read } from './projects.ts'
-import { closedChapter, compactEntry, id, limit, readChapter, searchHit } from './chapters.ts'
+import {
+  closedChapter,
+  compactEntry,
+  id,
+  limit,
+  readChapter,
+  searchHit,
+  yieldTurn,
+} from './chapters.ts'
 import type { EntriesOptions, HistoryRead, SearchOptions } from './chapters.ts'
 import { ConversationsApi } from '../conversations/api.ts'
 import { MessagesApi } from '../messages/api.ts'
@@ -121,6 +129,7 @@ function localReads(host: ExtensionHost, context: Context) {
         if (items.length === count) return items
       }
       cursor = page.next
+      await yieldTurn()
     } while (cursor)
     return items
   }
@@ -132,6 +141,7 @@ function localReads(host: ExtensionHost, context: Context) {
         ? await conversations()
         : [{ id: id(options.conversationId) }]
     const matches: unknown[] = []
+    let slice = performance.now()
     for (const conversation of records) {
       let cursor: Cursor | undefined
       do {
@@ -139,11 +149,17 @@ function localReads(host: ExtensionHost, context: Context) {
         if (!found) throw new Error('Unknown conversation')
         const page = await found.entries({}, 100, cursor, context)
         for (const entry of page.items) {
+          if (performance.now() - slice >= 4) {
+            await yieldTurn()
+            slice = performance.now()
+          }
           const hit = searchHit(entry, text, options)
           if (hit) matches.push(hit)
           if (matches.length === count) return matches
         }
         cursor = page.next
+        await yieldTurn()
+        slice = performance.now()
       } while (cursor)
     }
     return matches
