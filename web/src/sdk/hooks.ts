@@ -44,7 +44,7 @@ import {
 } from './registry.ts'
 import type { State } from './store.ts'
 import { errorMessage, formatDuration } from './format.ts'
-import type { CompactRow, ToolCallView, UltimateContext } from './types.ts'
+import type { CompactDocs, CompactRow, ToolCallView, UltimateContext } from './types.ts'
 import { useViewport } from './viewport.ts'
 import { ConversationIdContext, TranscriptContext } from './conversation-scope.tsx'
 export { TranscriptContext } from './conversation-scope.tsx'
@@ -348,6 +348,16 @@ export function useCompactThread() {
     return thread && { test: (row: CompactRow) => thread(row, docs), summary: compact.summary }
   }, [compact, docs])
 }
+function compactDocSelector(kinds: string) {
+  const declared = kinds ? kinds.split(',') : []
+  let selected: CompactDocs = noDocs
+  return (state: State) => {
+    const root = state.docsOf[ROOT]
+    if (declared.some((kind) => selected[kind] !== root?.[kind]))
+      selected = Object.fromEntries(declared.map((kind) => [kind, root?.[kind]]))
+    return selected
+  }
+}
 function useCompactConfig() {
   const records = useExtensions()
   const id = useConversation((conversation) => conversation.id)
@@ -357,7 +367,8 @@ function useCompactConfig() {
     const releases = kinds ? kinds.split(',').map((kind) => store.watchDocOf(ROOT, kind)) : []
     return () => releases.forEach((release) => release())
   }, [kinds])
-  const docs = useStore((state) => (kinds ? state.docsOf[1] : undefined)) ?? noDocs
+  const selectDocs = useMemo(() => compactDocSelector(kinds), [kinds])
+  const docs = useStore(selectDocs)
   const compact = useMemo(
     () => compactTools(records, conversation, docs, reportCompact),
     [records, conversation, docs],
