@@ -1,6 +1,7 @@
 import { parseConversationId, parseEntryId, offsetEntryId } from '../lib/ids.ts'
 import type {
   ConversationId,
+  ConversationWatch,
   Cursor,
   DocumentWatch,
   JsonObject,
@@ -104,9 +105,14 @@ function busyConversations(graph: TaskGraph) {
 }
 type StreamUniqueSubscriptionId = number
 
+interface Subscription {
+  conversation: ConversationId
+  update(kinds: string[], withView: boolean): Promise<void>
+  close(): Promise<void>
+}
 interface Connection {
   send: ReturnType<typeof eventStream>['send']
-  subscriptions: Map<StreamUniqueSubscriptionId, () => Promise<void>>
+  subscriptions: Map<StreamUniqueSubscriptionId, Subscription>
   closedBeforeOpen: Set<StreamUniqueSubscriptionId>
   ended: boolean
 }
@@ -341,7 +347,7 @@ export async function createApi(
       events.listeners.delete(send)
       streams.delete(stop)
       await ui!.stop()
-      await Promise.all([...connection.subscriptions.values()].map((close) => close()))
+      await Promise.all([...connection.subscriptions.values()].map((sub) => sub.close()))
       sse.end()
     }
     streams.add(stop)
@@ -357,73 +363,103 @@ export async function createApi(
     connection: Connection,
     streamUniqueId: StreamUniqueSubscriptionId,
     id: ConversationId,
-    kinds: string[],
-    withView: boolean,
+    requestedKinds: string[],
+    requestedView: boolean,
   ) {
-    const conversation = await harness.conversation(id, context)
-    if (!conversation) throw new HttpError(404, 'Unknown conversation')
-    const docs: { kind: string; watch: DocumentWatch<JsonObject> }[] = []
-    const unknown: string[] = []
-    const watches: { stop(): Promise<unknown> }[] = []
+    const existing = connection.subscriptions.get(streamUniqueId)
+    if (existing) {
+      if (existing.conversation !== id)
+        throw new HttpError(400, 'Subscription conversation changed')
+      await existing.update(requestedKinds, requestedView)
+      return
+    }
+    if (connection.ended || connection.closedBeforeOpen.has(streamUniqueId)) return
+
+    const docs = new Map<string, DocumentWatch<JsonObject>>()
+    let live: ConversationWatch | undefined
+    let subscriptionClosed = false
+    let pending = Promise.resolve()
+    const active = () => !subscriptionClosed && !connection.ended
+    const send = <K extends keyof ServerEvents>(name: K, data: ServerEvents[K]) => {
+      if (active()) connection.send(name, data, streamUniqueId)
+    }
     const stop = async () => {
+      const watches = [...docs.values(), ...(live ? [live] : [])]
+      docs.clear()
+      live = undefined
       await Promise.all(watches.map((watch) => watch.stop()))
     }
-    let live: Awaited<ReturnType<typeof conversation.watch>> | undefined
-    try {
-      for (const kind of new Set(kinds)) {
+    const update = async (kinds: string[], withView: boolean) => {
+      if (!active()) return
+      const conversation = await harness.conversation(id, context)
+      if (!conversation) throw new HttpError(404, 'Unknown conversation')
+      const wanted = new Set(kinds)
+      const removed: { stop(): Promise<unknown> }[] = []
+      for (const [kind, watch] of docs)
+        if (!wanted.has(kind)) {
+          docs.delete(kind)
+          removed.push(watch)
+        }
+      if (live && !withView) {
+        removed.push(live)
+        live = undefined
+      }
+      await Promise.all(removed.map((watch) => watch.stop()))
+      if (!active()) return
+      if (withView && !live) {
+        const watch = await conversation.watch(context, { min: liveViewMinimumEntries })
+        if (!active()) {
+          await watch.stop()
+          return
+        }
+        live = watch
+        send('view', watch.value)
+        watch.start(async (call) => {
+          if (live === watch && call.kind === 'value') send('ops', call.ops)
+        })
+      }
+      for (const kind of wanted) {
+        if (!active()) return
+        if (docs.has(kind)) continue
         const token = extensions.doc(kind)
         if (!token) {
-          unknown.push(kind)
+          connection.send('notice', {
+            level: 'warning',
+            message: `Unknown extension document: ${kind}`,
+          })
           continue
         }
         await conversation.commit(async (tx) => {
           await tx.doc(token, id)
         }, context)
         const watch = await harness.watchDoc(token, id, context)
-        if (watch) {
-          docs.push({ kind, watch })
-          watches.push(watch)
+        if (!watch) continue
+        if (!active()) {
+          await watch.stop()
+          return
         }
-      }
-      if (withView) {
-        live = await conversation.watch(context, { min: liveViewMinimumEntries })
-        watches.push(live)
-      }
-    } catch (error) {
-      await stop()
-      throw error
-    }
-    if (
-      connection.ended ||
-      connection.closedBeforeOpen.has(streamUniqueId) ||
-      connection.subscriptions.has(streamUniqueId)
-    ) {
-      await stop()
-      return
-    }
-    connection.subscriptions.set(streamUniqueId, stop)
-    const send = <K extends keyof ServerEvents>(name: K, data: ServerEvents[K]) =>
-      connection.send(name, data, streamUniqueId)
-    for (const kind of unknown)
-      connection.send('notice', {
-        level: 'warning',
-        message: `Unknown extension document: ${kind}`,
-      })
-    function deliverSnapshotsThenOps() {
-      if (live) {
-        send('view', live.value)
-        live.start(async (call) => {
-          if (call.kind === 'value') send('ops', call.ops)
-        })
-      }
-      for (const doc of docs) {
-        send('doc', { kind: doc.kind, value: doc.watch.value })
-        doc.watch.start(async (call) => {
-          if (call.kind === 'value') send('docOps', { kind: doc.kind, ops: call.ops })
+        docs.set(kind, watch)
+        send('doc', { kind, value: watch.value })
+        watch.start(async (call) => {
+          if (docs.get(kind) === watch && call.kind === 'value')
+            send('docOps', { kind, ops: call.ops })
         })
       }
     }
-    deliverSnapshotsThenOps()
+    const subscription: Subscription = {
+      conversation: id,
+      update(kinds, withView) {
+        const change = () => update(kinds, withView)
+        pending = pending.then(change, change)
+        return pending
+      },
+      close() {
+        subscriptionClosed = true
+        return pending.then(stop, stop)
+      },
+    }
+    connection.subscriptions.set(streamUniqueId, subscription)
+    await subscription.update(requestedKinds, requestedView)
   }
   function conversationParam(value: unknown) {
     const id = value === undefined ? root.id : Number(value)
@@ -454,10 +490,10 @@ export async function createApi(
           if (!connection) throw new HttpError(410, 'Event stream ended')
           const sub = Number(subscription[2])
           if (request.method === 'DELETE') {
-            const close = connection.subscriptions.get(sub)
+            const watched = connection.subscriptions.get(sub)
             connection.subscriptions.delete(sub)
-            if (close) await close()
-            else connection.closedBeforeOpen.add(sub)
+            connection.closedBeforeOpen.add(sub)
+            await watched?.close()
           } else {
             const data = await body(request)
             const docs = data.docs ?? []

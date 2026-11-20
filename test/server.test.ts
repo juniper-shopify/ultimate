@@ -922,6 +922,38 @@ export const actions = { list: async (_args, ctx) => ctx.host.conversations() }`
     expect(value).toEqual({ count: 1 })
     await stream.close()
   })
+  it('updates watched kinds without resending retained documents or the view', async () => {
+    const { server } = await fixture(false, {
+      large: `import { defineDoc, defineExtension } from '@earendil-works/pi-durable'
+export const docs = ['first', 'second', 'third'].map((name, index) => defineDoc({
+  kind: 'test.' + name, checkpointWhen: () => false, version: 1, scope: 'conversation',
+  history: 'latest', fork: 'initial', initial: () => ({ count: 0, text: 'x'.repeat(index === 0 ? 522000 : 426000) })
+}))
+export default defineExtension({ name: 'large' })`,
+    })
+    const stream = await attach(server, { docs: ['test.first', 'test.second'] })
+    const { id } = stream.events.find((event) => event.name === 'stream')!.data as { id: string }
+    const update = (docs: string[]) => post(server, `/api/events/${id}/0`, { docs })
+    const snapshots = () =>
+      stream.events
+        .filter((event) => event.name === 'doc')
+        .map((event) => (event.data as ServerEvents['doc']).kind)
+    await until(() => snapshots().length === 2)
+    expect((await update(['test.first', 'test.second', 'test.third'])).status).toBe(200)
+    await until(() => snapshots().length === 3)
+    expect(snapshots()).toEqual(['test.first', 'test.second', 'test.third'])
+    expect((await update(['test.first', 'test.second'])).status).toBe(200)
+    await server.harness.commit(async (tx) => {
+      ;(await tx.doc(server.extensions.doc('test.first')!, server.root.id)).count = 1
+    }, context)
+    await until(() => stream.events.some((event) => event.name === 'docOps'))
+    expect(snapshots()).toEqual(['test.first', 'test.second', 'test.third'])
+    expect(stream.events.filter((event) => event.name === 'view')).toHaveLength(1)
+    expect(
+      stream.events.filter((event) => event.name === 'docOps').map((event) => event.data),
+    ).toEqual([{ kind: 'test.first', ops: [['s', ['count'], 1]] }])
+    await stream.close()
+  })
   it("streams a conversation's pi.live alone, without its view", async () => {
     const { server } = await fixture(true)
     const stream = await attach(server, { docs: ['pi.live'], view: false })
