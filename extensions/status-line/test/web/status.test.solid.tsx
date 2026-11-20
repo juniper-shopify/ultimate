@@ -1,5 +1,4 @@
 /** @jsxImportSource @solidjs/web */
-import { settle } from '@ui-sdk/core/testing'
 import { flush } from 'solid-js'
 import { expect, it, vi } from 'vitest'
 import type { StreamedView, SystemInfo } from '../../../../shared/protocol.ts'
@@ -60,6 +59,8 @@ const usage = (input: number, output: number, cost: number) => ({
 it('shows the conversation’s spend, its context fill, the project’s rate and the connection', async ({
   onTestFinished,
 }) => {
+  vi.useFakeTimers()
+  onTestFinished(() => void vi.useRealTimers())
   harness.rates = {
     rates: { input: 10, output: 42.4, cacheRead: 0, cacheWrite: 0 },
     elapsed: 30,
@@ -86,18 +87,22 @@ it('shows the conversation’s spend, its context fill, the project’s rate and
       'pi.usage': { models: { 'claude-x': usage(1200, 300, 0.5) }, tools: {} },
     },
   } as unknown as StreamedView
+  await vi.advanceTimersByTimeAsync(0)
+  expect(harness.server!.of()!.docs).toContain('conversations.context')
   harness.server!.of()!.send('view', view)
   harness.server!.of()!.send('doc', {
     kind: 'conversations.context',
     value: { tokens: 160_000, window: 200_000, percent: 80, at: 1 },
   })
-  await settle()
+  await vi.advanceTimersByTimeAsync(10)
   flush()
 
   expect(container.textContent).toContain('↑1.2k↓300$0.500')
   const meter = container.querySelector('[aria-label="Context use"]')
   expect(meter?.textContent).toBe('80.0%/200k')
   expect(meter?.className).toContain('text-warning')
+  const cached = renderSolid(() => <Context />)
+  expect(cached.querySelector('[aria-label="Context use"]')?.textContent).toBe('80.0%/200k')
   expect(container.querySelector('[aria-label="Output token rate"]')?.textContent).toBe('↓42 tok/s')
   expect(container.querySelector('[aria-label="Global spend"]')?.textContent).toBe(
     '↑1.5k ↓2.5k $1.250',

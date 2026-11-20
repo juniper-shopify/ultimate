@@ -1,6 +1,7 @@
 import { parseConversationId, parseEntryId, offsetEntryId } from '../lib/ids.ts'
 import type {
   ConversationId,
+  ConversationWatch,
   Cursor,
   DocumentWatch,
   JsonObject,
@@ -26,7 +27,10 @@ import type { OpenHost, PreparedHost } from './harness.ts'
 import type { createSystem } from './system.ts'
 import { requestSwap } from './supervisor-protocol.ts'
 import { UiState, UiWriters } from '../shared/ui-state.ts'
+import { copyJson } from '@earendil-works/chord/json'
 import type { JsonValue } from '@earendil-works/chord/json'
+import { PendingOps } from '@earendil-works/chord/delta'
+import type { Op } from '@earendil-works/chord/delta'
 import { clampThinkingLevel, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import { Metadata } from './metadata.ts'
 import { EVENT_LOG_LABEL, emit, uiChange } from './events.ts'
@@ -74,6 +78,7 @@ function text(value: unknown, name: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new HttpError(400, `Expected ${name}`)
   return value
 }
+const conversationListBroadcastIntervalMs = 100
 const validUiKey = (key: unknown): key is string =>
   typeof key === 'string' && key.length <= 200 && /^[A-Za-z0-9_.:-]+$/.test(key)
 function uiOps(ops: unknown): UiOp[] {
@@ -95,13 +100,23 @@ const maxUiWriters = 1000
 const actionPath = /^\/api\/extensions\/([^/]+)\/actions\/([^/]+)$/
 const subscriptionPath = /^\/api\/events\/([0-9a-f-]+)\/(\d+)$/
 const maxResentSummaryTitleCharacters = 200
-const taskGraphBroadcastIntervalMs = 100
+const taskGraphBroadcastIntervalMs = 1000
 const liveViewMinimumEntries = 150
+function busyConversations(graph: TaskGraph) {
+  const busy = new Set<ConversationId>()
+  for (const task of Object.values(graph.tasks)) if (!task.background) busy.add(task.conversationId)
+  return busy
+}
 type StreamUniqueSubscriptionId = number
 
+interface Subscription {
+  conversation: ConversationId
+  update(kinds: string[], withView: boolean): Promise<void>
+  close(): Promise<void>
+}
 interface Connection {
   send: ReturnType<typeof eventStream>['send']
-  subscriptions: Map<StreamUniqueSubscriptionId, () => Promise<void>>
+  subscriptions: Map<StreamUniqueSubscriptionId, Subscription>
   closedBeforeOpen: Set<StreamUniqueSubscriptionId>
   ended: boolean
 }
@@ -192,28 +207,34 @@ export async function createApi(
   const { harness, root } = opened
   const streams = new Set<() => Promise<void>>()
   const connections = new Map<string, Connection>()
-  let onGraph = () => {}
-  const latestCommitGraph: { tasks?: TaskGraph } = {}
+  let onGraph: (ops: readonly Op[]) => void = () => {}
+  const latestCommitGraph: { tasks?: () => TaskGraph } = {}
   const graph = await harness.observeTaskGraph(
     {
       advance: (call) => {
         if (call.kind !== 'value') return
-        latestCommitGraph.tasks = call.value
-        onGraph()
+        latestCommitGraph.tasks = () => call.value
+        onGraph(call.ops)
       },
       end: () => {},
     },
     context,
   )
-  latestCommitGraph.tasks ??= graph.value
-  const tasks = () => latestCommitGraph.tasks!
+  latestCommitGraph.tasks ??= () => graph.value
+  const tasks = () => latestCommitGraph.tasks!()
   let closed = false
   let summaries: ConversationSummary[] = []
   const projectIndex = conversationIndex(host.home)
-  const indexListener: Parameters<typeof events.listeners.add>[0] = (name, data) => {
-    if (name === 'conversations') projectIndex.update(data as ConversationSummary[])
+  const changedConversationIds = new Set<ConversationId>()
+  const broadcastConversations = batch(conversationListBroadcastIntervalMs, () => {
+    const changed = summaries.filter((row) => changedConversationIds.has(row.id))
+    changedConversationIds.clear()
+    if (changed.length) events.emit('conversationsUpsert', changed)
+  })
+  function scheduleConversations() {
+    projectIndex.update(summaries)
+    if (!closed) broadcastConversations()
   }
-  events.listeners.add(indexListener)
   let refreshing = Promise.resolve()
   async function refreshConversations(ids?: Set<ConversationId>) {
     const records = await harness.commit(async (tx) => {
@@ -255,44 +276,52 @@ export async function createApi(
       })
     }
     const summariesIncludingConcurrentUpdates = ids ? [...summaries] : []
+    const busy = busyConversations(tasks())
     for (const fresh of refreshed) {
-      const summary = {
-        ...fresh,
-        busy: Object.values(tasks().tasks).some(
-          (task) => task.conversationId === fresh.id && !task.background,
-        ),
-      }
+      const summary = { ...fresh, busy: busy.has(fresh.id) }
       const index = summariesIncludingConcurrentUpdates.findIndex((item) => item.id === summary.id)
+      if (
+        index < 0 ||
+        JSON.stringify(summariesIncludingConcurrentUpdates[index]) !== JSON.stringify(summary)
+      )
+        changedConversationIds.add(summary.id)
       if (index < 0) summariesIncludingConcurrentUpdates.push(summary)
       else summariesIncludingConcurrentUpdates[index] = summary
     }
     if (JSON.stringify(summariesIncludingConcurrentUpdates) !== JSON.stringify(summaries)) {
       summaries = summariesIncludingConcurrentUpdates
-      events.emit('conversations', summaries)
+      scheduleConversations()
     }
   }
   await refreshConversations()
+  broadcastConversations.cancel()
+  changedConversationIds.clear()
+  if (summaries.length) events.emit('conversations', summaries)
   projectIndex.update(summaries)
-  let lastGraph = JSON.stringify(tasks())
+  let publishedGraph = tasks()
+  const pendingGraph = new PendingOps()
   const scheduleGraph = batch(taskGraphBroadcastIntervalMs, () => {
-    const graphJson = JSON.stringify(tasks())
-    if (graphJson !== lastGraph) {
-      lastGraph = graphJson
-      events.emit('tasks', tasks())
-      const next = summaries.map((summary) => ({
-        ...summary,
-        busy: Object.values(tasks().tasks).some(
-          (task) => task.conversationId === summary.id && !task.background,
-        ),
-      }))
-      if (JSON.stringify(next) !== JSON.stringify(summaries)) {
-        summaries = next
-        events.emit('conversations', summaries)
-      }
+    const pending = pendingGraph.take()
+    if (pending.kind === 'ops' && !pending.ops.length) return
+    publishedGraph = tasks()
+    events.emit('tasksOps', {
+      ops: pending.kind === 'replace' ? [['r', copyJson(publishedGraph)]] : pending.ops,
+    })
+    const busy = busyConversations(publishedGraph)
+    const next = summaries.map((summary) => {
+      const isBusy = busy.has(summary.id)
+      if (isBusy !== summary.busy) changedConversationIds.add(summary.id)
+      return { ...summary, busy: isBusy }
+    })
+    if (JSON.stringify(next) !== JSON.stringify(summaries)) {
+      summaries = next
+      scheduleConversations()
     }
   })
-  onGraph = () => {
-    if (!closed) scheduleGraph()
+  onGraph = (ops) => {
+    if (closed) return
+    pendingGraph.push(ops)
+    scheduleGraph()
   }
   const unsubscribe = onCommit(harness, (publication) => {
     if (closed) return
@@ -335,7 +364,7 @@ export async function createApi(
     ui!.start(async (call) => {
       if (call.kind === 'value') send('uiOps', { ops: call.ops })
     })
-    send('tasks', tasks())
+    send('tasks', publishedGraph)
     events.listeners.add(send)
     const stop = async () => {
       if (connection.ended) return
@@ -344,7 +373,7 @@ export async function createApi(
       events.listeners.delete(send)
       streams.delete(stop)
       await ui!.stop()
-      await Promise.all([...connection.subscriptions.values()].map((close) => close()))
+      await Promise.all([...connection.subscriptions.values()].map((sub) => sub.close()))
       sse.end()
     }
     streams.add(stop)
@@ -360,73 +389,103 @@ export async function createApi(
     connection: Connection,
     streamUniqueId: StreamUniqueSubscriptionId,
     id: ConversationId,
-    kinds: string[],
-    withView: boolean,
+    requestedKinds: string[],
+    requestedView: boolean,
   ) {
-    const conversation = await harness.conversation(id, context)
-    if (!conversation) throw new HttpError(404, 'Unknown conversation')
-    const docs: { kind: string; watch: DocumentWatch<JsonObject> }[] = []
-    const unknown: string[] = []
-    const watches: { stop(): Promise<unknown> }[] = []
+    const existing = connection.subscriptions.get(streamUniqueId)
+    if (existing) {
+      if (existing.conversation !== id)
+        throw new HttpError(400, 'Subscription conversation changed')
+      await existing.update(requestedKinds, requestedView)
+      return
+    }
+    if (connection.ended || connection.closedBeforeOpen.has(streamUniqueId)) return
+
+    const docs = new Map<string, DocumentWatch<JsonObject>>()
+    let live: ConversationWatch | undefined
+    let subscriptionClosed = false
+    let pending = Promise.resolve()
+    const active = () => !subscriptionClosed && !connection.ended
+    const send = <K extends keyof ServerEvents>(name: K, data: ServerEvents[K]) => {
+      if (active()) connection.send(name, data, streamUniqueId)
+    }
     const stop = async () => {
+      const watches = [...docs.values(), ...(live ? [live] : [])]
+      docs.clear()
+      live = undefined
       await Promise.all(watches.map((watch) => watch.stop()))
     }
-    let live: Awaited<ReturnType<typeof conversation.watch>> | undefined
-    try {
-      for (const kind of new Set(kinds)) {
+    const update = async (kinds: string[], withView: boolean) => {
+      if (!active()) return
+      const conversation = await harness.conversation(id, context)
+      if (!conversation) throw new HttpError(404, 'Unknown conversation')
+      const wanted = new Set(kinds)
+      const removed: { stop(): Promise<unknown> }[] = []
+      for (const [kind, watch] of docs)
+        if (!wanted.has(kind)) {
+          docs.delete(kind)
+          removed.push(watch)
+        }
+      if (live && !withView) {
+        removed.push(live)
+        live = undefined
+      }
+      await Promise.all(removed.map((watch) => watch.stop()))
+      if (!active()) return
+      if (withView && !live) {
+        const watch = await conversation.watch(context, { min: liveViewMinimumEntries })
+        if (!active()) {
+          await watch.stop()
+          return
+        }
+        live = watch
+        send('view', watch.value)
+        watch.start(async (call) => {
+          if (live === watch && call.kind === 'value') send('ops', call.ops)
+        })
+      }
+      for (const kind of wanted) {
+        if (!active()) return
+        if (docs.has(kind)) continue
         const token = extensions.doc(kind)
         if (!token) {
-          unknown.push(kind)
+          connection.send('notice', {
+            level: 'warning',
+            message: `Unknown extension document: ${kind}`,
+          })
           continue
         }
         await conversation.commit(async (tx) => {
           await tx.doc(token, id)
         }, context)
         const watch = await harness.watchDoc(token, id, context)
-        if (watch) {
-          docs.push({ kind, watch })
-          watches.push(watch)
+        if (!watch) continue
+        if (!active()) {
+          await watch.stop()
+          return
         }
-      }
-      if (withView) {
-        live = await conversation.watch(context, { min: liveViewMinimumEntries })
-        watches.push(live)
-      }
-    } catch (error) {
-      await stop()
-      throw error
-    }
-    if (
-      connection.ended ||
-      connection.closedBeforeOpen.has(streamUniqueId) ||
-      connection.subscriptions.has(streamUniqueId)
-    ) {
-      await stop()
-      return
-    }
-    connection.subscriptions.set(streamUniqueId, stop)
-    const send = <K extends keyof ServerEvents>(name: K, data: ServerEvents[K]) =>
-      connection.send(name, data, streamUniqueId)
-    for (const kind of unknown)
-      connection.send('notice', {
-        level: 'warning',
-        message: `Unknown extension document: ${kind}`,
-      })
-    function deliverSnapshotsThenOps() {
-      if (live) {
-        send('view', live.value)
-        live.start(async (call) => {
-          if (call.kind === 'value') send('ops', call.ops)
-        })
-      }
-      for (const doc of docs) {
-        send('doc', { kind: doc.kind, value: doc.watch.value })
-        doc.watch.start(async (call) => {
-          if (call.kind === 'value') send('docOps', { kind: doc.kind, ops: call.ops })
+        docs.set(kind, watch)
+        send('doc', { kind, value: watch.value })
+        watch.start(async (call) => {
+          if (docs.get(kind) === watch && call.kind === 'value')
+            send('docOps', { kind, ops: call.ops })
         })
       }
     }
-    deliverSnapshotsThenOps()
+    const subscription: Subscription = {
+      conversation: id,
+      update(kinds, withView) {
+        const change = () => update(kinds, withView)
+        pending = pending.then(change, change)
+        return pending
+      },
+      close() {
+        subscriptionClosed = true
+        return pending.then(stop, stop)
+      },
+    }
+    connection.subscriptions.set(streamUniqueId, subscription)
+    await subscription.update(requestedKinds, requestedView)
   }
   function conversationParam(value: unknown) {
     const id = value === undefined ? root.id : Number(value)
@@ -457,10 +516,10 @@ export async function createApi(
           if (!connection) throw new HttpError(410, 'Event stream ended')
           const sub = Number(subscription[2])
           if (request.method === 'DELETE') {
-            const close = connection.subscriptions.get(sub)
+            const watched = connection.subscriptions.get(sub)
             connection.subscriptions.delete(sub)
-            if (close) await close()
-            else connection.closedBeforeOpen.add(sub)
+            connection.closedBeforeOpen.add(sub)
+            await watched?.close()
           } else {
             const data = await body(request)
             const docs = data.docs ?? []
@@ -789,9 +848,9 @@ export async function createApi(
       unsubscribe()
       graph.detach()
       scheduleGraph.cancel()
+      broadcastConversations.cancel()
       await Promise.all([...streams].map((stop) => stop()))
       await refreshing
-      events.listeners.delete(indexListener)
       await projectIndex.flush()
     },
   }

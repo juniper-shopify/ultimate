@@ -22,8 +22,10 @@ it('reads closed chapter records exactly like live fork-aware history, with titl
   await (await prepared.open(false)).close()
   await requestChapter(home, 'next')
   let opened = await prepared.open(false)
+  const cleanups: (() => Promise<void>)[] = []
   const host = {
     home,
+    onClose: (cleanup: () => Promise<void>) => cleanups.push(cleanup),
     get chapter() {
       return prepared.chapter
     },
@@ -139,6 +141,7 @@ it('reads closed chapter records exactly like live fork-aware history, with titl
       read('conversations', [{ chapter: 'next', project: 'elsewhere' }]),
     ).rejects.toThrow('chapter and project cannot be used together')
   } finally {
+    for (const cleanup of cleanups) await cleanup()
     await opened.close()
   }
 })

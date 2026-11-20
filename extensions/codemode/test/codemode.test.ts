@@ -66,7 +66,15 @@ async function fixture() {
       .replace("'../../lib/agents.ts'", JSON.stringify(resolve('lib/agents.ts')))
       .replace("'../../lib/api-files.ts'", JSON.stringify(resolve('lib/api-files.ts'))),
   )
-  for (const file of ['api.ts', 'chapters.ts', 'projects.ts', 'refs.ts', 'summary.ts'])
+  for (const file of [
+    'api.ts',
+    'chapters.ts',
+    'history-reads.ts',
+    'history-worker.ts',
+    'projects.ts',
+    'refs.ts',
+    'summary.ts',
+  ])
     await cp(resolve('extensions/codemode', file), join(ultimateRoot, 'extensions/codemode', file))
   const options = {
     ultimateRoot,

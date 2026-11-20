@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useConversations, useStore } from '@/sdk'
 import { store } from '@/sdk/client'
 import { parseConversationId } from '../../lib/ids.ts'
@@ -6,25 +6,34 @@ import { useOverview } from '../conversations/ui.tsx'
 import { useWorkspaceIndex } from '../workspaces/ui.tsx'
 import { StartedDoc } from './refs.ts'
 
-export function useStarters() {
-  const ids = useConversations()
-    .filter((c) => c.branchOf)
-    .map((c) => c.id)
-    .join(',')
+export function useStarters(branchIds: readonly number[]) {
+  const ids = [...new Set(branchIds)].toSorted((a, b) => a - b).join(',')
+  const watched = useRef(new Map<number, () => void>())
   useEffect(() => {
-    const stop = ids
-      ? ids
-          .split(',')
-          .map((id) => store.watchDocOf(parseConversationId(Number(id)), StartedDoc.kind))
-      : []
-    return () => stop.forEach((cancel) => cancel())
+    const next = new Set(ids ? ids.split(',').map(Number) : [])
+    for (const [id, stop] of watched.current) {
+      if (next.has(id)) continue
+      stop()
+      watched.current.delete(id)
+    }
+    for (const id of next) {
+      if (!watched.current.has(id))
+        watched.current.set(id, store.watchDocOf(parseConversationId(id), StartedDoc.kind))
+    }
   }, [ids])
+  useEffect(
+    () => () => {
+      for (const stop of watched.current.values()) stop()
+      watched.current.clear()
+    },
+    [],
+  )
   const starters = useStore((state) =>
-    ids
-      .split(',')
-      .flatMap((id) => {
-        const by = state.docsOf[Number(id)]?.[StartedDoc.kind]?.by
-        return typeof by === 'number' ? [`${id}:${by}`] : []
+    (ids ? ids.split(',') : [])
+      .map((id) => {
+        const doc = state.docsOf[Number(id)]?.[StartedDoc.kind]
+        const by = doc?.by
+        return `${id}:${doc === undefined ? '?' : typeof by === 'number' ? by : ''}`
       })
       .join(','),
   )
@@ -34,7 +43,10 @@ export function useStarters() {
         starters
           ? starters.split(',').map((pair) => {
               const [id, starter] = pair.split(':')
-              return [Number(id), Number(starter)] as const
+              return [
+                Number(id),
+                starter === '?' ? null : starter ? Number(starter) : undefined,
+              ] as const
             })
           : [],
       ),

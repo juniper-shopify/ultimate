@@ -354,7 +354,7 @@ async function waitForChildLocally(
     return true
   }
   const completion = async () => {
-    for (const reporter of reporters) await api.waitForTask(reporter, local.context)
+    for (const reporter of reporters) await api.waitForTask(reporter, context)
     if (idle) await child.waitForIdle(local.context)
   }
   try {

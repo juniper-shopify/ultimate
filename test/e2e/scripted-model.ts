@@ -29,14 +29,14 @@ const chunk = (delta: object, finish: string | null = null) =>
   })}\n\n`
 
 /** Serve `answer` as the default model of a fresh Pi agent directory; `env` is what a child needs to use it. */
-export async function scriptedModel(answer: (last: Turn) => Answer) {
+export async function scriptedModel(answer: (last: Turn) => Answer | Promise<Answer>) {
   const server = createServer((request, response) => {
     let body = ''
     request.on('data', (data) => (body += data))
-    request.on('end', () => {
+    request.on('end', async () => {
       const { messages } = JSON.parse(body) as { messages: { role: string; content: unknown }[] }
       const last = messages.at(-1)!
-      const { text, tool } = answer({ role: last.role, text: textOf(last.content) })
+      const { text, tool } = await answer({ role: last.role, text: textOf(last.content) })
       response.writeHead(200, { 'Content-Type': 'text/event-stream' })
       if (text) response.write(chunk({ role: 'assistant', content: text }))
       if (tool)
@@ -56,31 +56,47 @@ export async function scriptedModel(answer: (last: Turn) => Answer) {
       response.end('data: [DONE]\n\n')
     })
   })
-  await new Promise<void>((listening) => server.listen(0, '127.0.0.1', listening))
-  const { port } = server.address() as AddressInfo
-  const agentDir = await mkdtemp(join(tmpdir(), 'ultimate-scripted-pi-'))
-  await writeFile(
-    join(agentDir, 'models.json'),
-    JSON.stringify({
-      providers: {
-        scripted: {
-          baseUrl: `http://127.0.0.1:${port}/v1`,
-          api: 'openai-completions',
-          apiKey: 'scripted',
-          models: [{ id: 'scripted-1' }],
+  let agentDir: string | undefined
+  try {
+    await new Promise<void>((listening, reject) => {
+      const fail = (error: Error) => reject(error)
+      server.once('error', fail)
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', fail)
+        listening()
+      })
+    })
+    const { port } = server.address() as AddressInfo
+    agentDir = await mkdtemp(join(tmpdir(), 'ultimate-scripted-pi-'))
+    await writeFile(
+      join(agentDir, 'models.json'),
+      JSON.stringify({
+        providers: {
+          scripted: {
+            baseUrl: `http://127.0.0.1:${port}/v1`,
+            api: 'openai-completions',
+            apiKey: 'scripted',
+            models: [{ id: 'scripted-1' }],
+          },
         },
+      }),
+    )
+    await writeFile(
+      join(agentDir, 'settings.json'),
+      JSON.stringify({ defaultProvider: 'scripted', defaultModel: 'scripted-1' }),
+    )
+    const ownedAgentDir = agentDir
+    return {
+      env: { PI_CODING_AGENT_DIR: agentDir },
+      close: async () => {
+        await new Promise<void>((closed) => server.close(() => closed()))
+        await rm(ownedAgentDir, { recursive: true, force: true })
       },
-    }),
-  )
-  await writeFile(
-    join(agentDir, 'settings.json'),
-    JSON.stringify({ defaultProvider: 'scripted', defaultModel: 'scripted-1' }),
-  )
-  return {
-    env: { PI_CODING_AGENT_DIR: agentDir },
-    close: async () => {
-      await new Promise<void>((closed) => server.close(() => closed()))
-      await rm(agentDir, { recursive: true, force: true })
-    },
+    }
+  } catch (error) {
+    server.closeAllConnections()
+    await new Promise<void>((closed) => server.close(() => closed()))
+    if (agentDir) await rm(agentDir, { recursive: true, force: true })
+    throw error
   }
 }

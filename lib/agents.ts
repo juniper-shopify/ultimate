@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs'
 import { readdir, readFile, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { clampThinkingLevel } from '@earendil-works/pi-ai'
@@ -5,16 +6,18 @@ import type { ModelThinkingLevel } from '@earendil-works/pi-ai'
 import type { Agent, AgentChange } from '@earendil-works/pi-durable'
 import { parseFrontmatter, resolveCliModel } from '@earendil-works/pi-coding-agent'
 import type { ModelRuntime, SettingsManager } from '@earendil-works/pi-coding-agent'
+import { discoveryRoots } from './project-paths.ts'
 import type { Source } from './project-paths.ts'
+import { extensionSettingsFiles } from './extension-settings.ts'
 import { writeTextAtomically } from './json-file.ts'
 import { isIconName, isMarkTint, markTints } from './marks.ts'
 import type { MarkTint } from './marks.ts'
 import { DEFAULT_FAMILY, definitionRuns, isFamilyName, refName, refOf } from './families.ts'
 import type { Families } from './families.ts'
-import { readFamilies } from './families-settings.ts'
+import { familiesPath, readFamilies } from './families-settings.ts'
 import { projectDecision, useProjectSetup } from './project-setup.ts'
 import { discoverExtensions } from './discovery.ts'
-import { isMissing } from './errors.ts'
+import { isMissing, meansNone } from './errors.ts'
 
 type DeferredToolNamesWhenInheritingAll = string[]
 export interface AgentDefinition {
@@ -400,6 +403,43 @@ export async function agentRoots(ultimateRoot: string, projectRoot: string, user
   ]
 }
 
+type AgentRoots = Awaited<ReturnType<typeof agentRoots>>
+type Reading = { reads: string[]; stamp: string; discovery: AgentDiscovery }
+type Discovered = { at: number; reading: Promise<Reading> }
+const discoveredByRuntimeAndRoots = new WeakMap<ModelRuntime, Map<string, Discovered>>()
+const REDISCOVER_AFTER_MS = 10_000
+
+function modificationStamp(paths: string[]) {
+  let stamp = ''
+  for (const path of paths) {
+    const stat = statSync(path, { throwIfNoEntry: false })
+    stamp += stat ? `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs};` : '-;'
+  }
+  return stamp
+}
+
+async function filesDiscoveryReads(
+  roots: AgentRoots,
+  ultimateRoot: string,
+  projectRoot: string,
+  userHome: string,
+) {
+  const reads = [
+    join(userHome, '.ultimate/trust.json'),
+    familiesPath(userHome),
+    ...extensionSettingsFiles(projectRoot, userHome),
+    ...discoveryRoots(ultimateRoot, projectRoot, userHome).map((root) =>
+      join(root.path, 'extensions'),
+    ),
+  ]
+  for (const { path: directory } of roots) {
+    reads.push(directory)
+    const files = await readdir(directory).catch((): string[] => [])
+    for (const file of files) if (file.endsWith('.md')) reads.push(join(directory, file))
+  }
+  return reads
+}
+
 export async function discoverAgents(
   ultimateRoot: string,
   projectRoot: string,
@@ -407,11 +447,63 @@ export async function discoverAgents(
   modelRuntime: ModelRuntime,
   skipOverlayToReadItsBase?: string,
 ): Promise<AgentDiscovery> {
+  if (skipOverlayToReadItsBase !== undefined)
+    return readAgents(ultimateRoot, projectRoot, userHome, modelRuntime, skipOverlayToReadItsBase)
+  let byRoots = discoveredByRuntimeAndRoots.get(modelRuntime)
+  if (!byRoots) discoveredByRuntimeAndRoots.set(modelRuntime, (byRoots = new Map()))
+  const key = [ultimateRoot, projectRoot, userHome].join('\0')
+  for (let kept = byRoots.get(key); kept; kept = byRoots.get(key)) {
+    const read = await kept.reading.catch(meansNone)
+    if (
+      read &&
+      Date.now() - kept.at < REDISCOVER_AFTER_MS &&
+      modificationStamp(read.reads) === read.stamp
+    )
+      return structuredClone(read.discovery)
+    const anotherCallerAlreadyReadsAgain = byRoots.get(key) !== kept
+    if (anotherCallerAlreadyReadsAgain) continue
+    byRoots.delete(key)
+  }
+  const mine: Discovered = {
+    at: Date.now(),
+    reading: (async () => {
+      const roots = await agentRoots(ultimateRoot, projectRoot, userHome)
+      const reads = await filesDiscoveryReads(roots, ultimateRoot, projectRoot, userHome)
+      const stampBeforeReading = modificationStamp(reads)
+      const discovery = await readAgents(
+        ultimateRoot,
+        projectRoot,
+        userHome,
+        modelRuntime,
+        undefined,
+        roots,
+      )
+      return { reads, stamp: stampBeforeReading, discovery }
+    })(),
+  }
+  byRoots.set(key, mine)
+  try {
+    return structuredClone((await mine.reading).discovery)
+  } catch (error) {
+    if (byRoots.get(key) === mine) byRoots.delete(key)
+    throw error
+  }
+}
+
+async function readAgents(
+  ultimateRoot: string,
+  projectRoot: string,
+  userHome: string,
+  modelRuntime: ModelRuntime,
+  skipOverlayToReadItsBase?: string,
+  roots?: AgentRoots,
+): Promise<AgentDiscovery> {
   const definitions = new Map<string, AgentDefinition & { source: Source }>()
   const errors: AgentDiscovery['errors'] = []
   const builtins = new Set<string>()
   const replaced: AgentDiscovery['replaced'] = []
-  for (const { source, path: directory } of await agentRoots(ultimateRoot, projectRoot, userHome)) {
+  for (const { source, path: directory } of roots ??
+    (await agentRoots(ultimateRoot, projectRoot, userHome))) {
     let files: string[]
     try {
       files = await readdir(directory)

@@ -11,6 +11,9 @@ replaces the whole extension, both facets:
 | `user`    | `~/.ultimate/extensions/`         | Your additions, in every project                                   |
 | `project` | `<project>/.ultimate/extensions/` | One project's tools and apps, committed with the project; wins all |
 
+Discovery reads up to 16 independent extension folders concurrently within each source root, then applies their
+results in the original order; source precedence and core-tier checks are unchanged.
+
 A tool name follows the same layering: a project or user extension may override a built-in's tool (a project `bash`
 replaces coding-tools'). Two extensions of the same source may not share one: the one that loaded second fails with
 a load error such as `web_search is already provided by parallel`, and takes the name on its next reload once the

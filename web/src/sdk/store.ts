@@ -1,3 +1,5 @@
+import { ROOT } from './api.ts'
+import { createSubscriptionLane } from './subscription-lane.ts'
 import { parseConversationId } from '../../../lib/ids.ts'
 import type { JsonObject, TaskGraph, ConversationId } from '@earendil-works/pi-durable'
 import { applyImmutable } from '@earendil-works/chord/delta'
@@ -72,6 +74,7 @@ const names = [
   'stream',
   'system',
   'conversations',
+  'conversationsUpsert',
   'view',
   'ops',
   'ui',
@@ -79,11 +82,21 @@ const names = [
   'doc',
   'docOps',
   'tasks',
+  'tasksOps',
   'notice',
 ] as const satisfies readonly (keyof ServerEvents)[]
 
 const subscriptionIdPrefixedEvents = new Set<keyof ServerEvents>(['view', 'ops', 'doc', 'docOps'])
 type Handler = (name: 'view' | 'ops' | 'doc' | 'docOps', raw: string) => void
+
+type SubscriptionSpec = { conversation?: ConversationId; docs: string[]; view: boolean }
+interface SubscriptionPost {
+  controller: AbortController
+  sent: boolean
+  stream?: string
+  spec: SubscriptionSpec
+}
+const backgroundSubscriptionRequestLimit = 4
 
 interface DocStream {
   kinds: string
@@ -118,6 +131,7 @@ export function createStore(options: StoreOptions = {}) {
   }
   const listeners = new Set<() => void>()
   const docKinds = new Map<string, number>()
+  let mainDocKinds = new Set<string>()
 
   const docWatchCountsByConversation = new Map<ConversationId, Map<string, number>>()
   const watchedViews = new Map<ConversationId, number>()
@@ -128,6 +142,10 @@ export function createStore(options: StoreOptions = {}) {
 
   let streamId: string | undefined
   const handlers = new Map<number, Handler>()
+  const pendingSubscriptions = new Map<number, Promise<void>>()
+  const subscriptionPosts = new Map<number, SubscriptionPost>()
+  const subscriptionLane = createSubscriptionLane(backgroundSubscriptionRequestLimit)
+  let subscriptionController = new AbortController()
   let nextSub = 0
   let main: number | undefined
   let opened = false
@@ -144,7 +162,7 @@ export function createStore(options: StoreOptions = {}) {
   const retainedConversationLimit = 6
 
   const lastWholeStateEventText: Partial<Record<keyof ServerEvents, string>> = {}
-  const snapshots = new Set<keyof ServerEvents>(['system', 'conversations', 'tasks'])
+  const snapshots = new Set<keyof ServerEvents>(['system', 'conversations'])
   function remember(view: StreamedView, raw?: string) {
     const id = view.conversation.id
     recentViewsWithRawSnapshots.delete(id)
@@ -186,6 +204,19 @@ export function createStore(options: StoreOptions = {}) {
         set({ conversations })
         break
       }
+      case 'conversationsUpsert': {
+        delete lastWholeStateEventText.conversations
+        const conversations = new Map(state.conversations.map((summary) => [summary.id, summary]))
+        let changed = false
+        for (const summary of data as ServerEvents['conversationsUpsert']) {
+          const previous = conversations.get(summary.id)
+          if (previous && JSON.stringify(previous) === JSON.stringify(summary)) continue
+          conversations.set(summary.id, summary)
+          changed = true
+        }
+        if (changed) set({ conversations: [...conversations.values()] })
+        break
+      }
       case 'ops':
         if (state.view) {
           const view = applyImmutable(state.view, data as ServerEvents['ops'])
@@ -205,13 +236,17 @@ export function createStore(options: StoreOptions = {}) {
       case 'doc':
       case 'docOps': {
         const event = data as ServerEvents['doc'] | ServerEvents['docOps']
-        if (!docKinds.has(event.kind)) break
+        if (!mainDocKinds.has(event.kind)) break
         const docs = applyDoc(state.docs, event)
         if (docs !== state.docs) set({ docs })
         break
       }
       case 'tasks':
         set({ tasks: data as TaskGraph })
+        break
+      case 'tasksOps':
+        if (state.tasks)
+          set({ tasks: applyImmutable(state.tasks, (data as ServerEvents['tasksOps']).ops) })
         break
       case 'notice':
         set({
@@ -236,61 +271,137 @@ export function createStore(options: StoreOptions = {}) {
     set({ view, restored: false })
   }
 
-  function subscribe(
-    spec: { conversation?: ConversationId; docs: string[]; view: boolean },
-    handler: Handler,
-    failed: (status: number) => void,
-  ) {
+  function subscribe(spec: SubscriptionSpec, handler: Handler, failed: (status: number) => void) {
     const sub = ++nextSub
     handlers.set(sub, handler)
-    const stream = streamId
-    if (stream === undefined) return sub
-    const refused = (status: number) => {
-      if (handlers.has(sub) && streamId === stream) failed(status)
-    }
-    void request(`/api/events/${stream}/${sub}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(spec),
-    }).then(
-      (response) => {
-        if (!response.ok) refused(response.status)
-      },
-      () => refused(0),
-    )
+    subscriptionPosts.set(sub, { controller: new AbortController(), sent: false, spec })
+    updateSubscription(sub, spec, failed)
     return sub
   }
+  function updateSubscription(
+    sub: number,
+    spec: SubscriptionSpec,
+    failed: (status: number) => void,
+  ) {
+    const stream = streamId
+    if (stream === undefined) return
+    const post = subscriptionPosts.get(sub)!
+    const wasInteractive = interactiveSubscription(post.spec)
+    post.spec = spec
+    if (!wasInteractive && interactiveSubscription(spec)) subscriptionLane.promote()
+    const signal = AbortSignal.any([post.controller.signal, subscriptionController.signal])
+    const refused = (status: number) => {
+      if (!signal.aborted && handlers.has(sub) && streamId === stream) failed(status)
+    }
+    const send = () => {
+      if (!handlers.has(sub) || streamId !== stream) return Promise.resolve()
+      return subscriptionLane
+        .run(
+          async () => {
+            if (!handlers.has(sub) || streamId !== stream) return
+            post.sent = true
+            post.stream = stream
+            const response = await request(`/api/events/${stream}/${sub}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(spec),
+              signal,
+            })
+            await response.text()
+            if (!response.ok) refused(response.status)
+          },
+          () => interactiveSubscription(post.spec),
+          signal,
+        )
+        .catch(() => refused(0))
+    }
+    const pending = pendingSubscriptions.get(sub)
+    pendingSubscriptions.set(sub, pending ? pending.then(send) : send())
+  }
+  function interactiveSubscription(spec: SubscriptionSpec) {
+    return (
+      spec.view ||
+      spec.conversation === ROOT ||
+      spec.conversation === (state.requested ?? state.view?.conversation.id)
+    )
+  }
+  function resetSubscriptionRequests() {
+    subscriptionController.abort()
+    subscriptionController = new AbortController()
+    subscriptionPosts.clear()
+    pendingSubscriptions.clear()
+  }
   function unsubscribe(sub: number | undefined) {
-    if (sub === undefined || !handlers.delete(sub) || streamId === undefined) return
-    request(`/api/events/${streamId}/${sub}`, { method: 'DELETE' }).catch(meansNone)
+    if (sub === undefined) return
+    const post = subscriptionPosts.get(sub)
+    subscriptionPosts.delete(sub)
+    pendingSubscriptions.delete(sub)
+    const watched = handlers.delete(sub)
+    post?.controller.abort()
+    if (!watched || streamId === undefined || !post?.sent) return
+    const signal = subscriptionController.signal
+    subscriptionLane
+      .run(
+        async () => {
+          const response = await request(`/api/events/${post.stream}/${sub}`, {
+            method: 'DELETE',
+            signal,
+          })
+          await response.text()
+        },
+        () => interactiveSubscription(post.spec),
+        signal,
+      )
+      .catch(meansNone)
   }
 
   function openMain() {
-    cancelResubscribe?.()
     unsubscribe(main)
-    const requested = state.requested
+    main = undefined
+    syncMain()
+  }
+  function syncMain() {
+    cancelResubscribe?.()
+    mainDocKinds = new Set(docKinds.keys())
+    if (Object.keys(state.docs).some((kind) => !mainDocKinds.has(kind)))
+      set({
+        docs: Object.fromEntries(
+          Object.entries(state.docs).filter(([kind]) => mainDocKinds.has(kind)),
+        ),
+      })
+    const spec = {
+      conversation: state.requested,
+      docs: [...mainDocKinds].toSorted(),
+      view: true,
+    }
+    if (main !== undefined) {
+      updateSubscription(main, spec, retryMain)
+      return
+    }
     main = subscribe(
-      { conversation: requested, docs: [...docKinds.keys()].toSorted(), view: true },
+      spec,
       (name, raw) =>
         name === 'view' ? replaceViewFromFreshSnapshot(raw) : handle(name, JSON.parse(raw)),
-      (status) => {
-        if (status === STREAM_GONE_RECONNECT_RESUBSCRIBES) return
-
-        const requestedConversationNeverOpened =
-          status === 404 && requested !== undefined && !state.view
-        if (requestedConversationNeverOpened) {
-          set({ requested: undefined })
-          options.onFallback?.()
-          openMain()
-        } else cancelResubscribe = retryAfter(options.retryMs ?? 1000, openMain)
-      },
+      retryMain,
     )
+  }
+  function retryMain(status: number) {
+    if (status === STREAM_GONE_RECONNECT_RESUBSCRIBES) return
+    cancelResubscribe?.()
+    const requestedConversationNeverOpened =
+      status === 404 && state.requested !== undefined && !state.view
+    if (requestedConversationNeverOpened) {
+      set({ requested: undefined })
+      options.onFallback?.()
+      openMain()
+    } else cancelResubscribe = retryAfter(options.retryMs ?? 1000, openMain)
   }
 
   function connect() {
     cancelRetry?.()
     multiplexedEventSource?.close()
     streamId = undefined
+    resetSubscriptionRequests()
     const current = open('/api/events')
     multiplexedEventSource = current
     opened = false
@@ -302,6 +413,7 @@ export function createStore(options: StoreOptions = {}) {
     current.addEventListener('error', () => {
       if (multiplexedEventSource !== current) return
       streamId = undefined
+      resetSubscriptionRequests()
       setConnection(opened || state.view ? 'reconnecting' : 'connecting')
 
       if (current.readyState === EVENT_SOURCE_CLOSED_NO_RETRY)
@@ -320,6 +432,7 @@ export function createStore(options: StoreOptions = {}) {
         } else if (name === 'stream') {
           streamId = (JSON.parse(raw) as ServerEvents['stream']).id
           handlers.clear()
+          resetSubscriptionRequests()
           openMain()
 
           const subscriptionsBeforeReopen = Array.from(sharedSubscriptionsByConversation)
@@ -336,7 +449,7 @@ export function createStore(options: StoreOptions = {}) {
   function scheduleMain() {
     if (stopped) return
     cancelResubscribe?.()
-    cancelResubscribe = nextTurn(openMain)
+    cancelResubscribe = nextTurn(syncMain)
   }
 
   function openDocs(conversation: ConversationId, kinds: string, withView: boolean) {
@@ -363,12 +476,14 @@ export function createStore(options: StoreOptions = {}) {
         const next = applyDoc(docs, change)
         if (next !== docs) set({ docsOf: { ...state.docsOf, [conversation]: next } })
       },
-      (status) => {
-        if (status !== STREAM_GONE_RECONNECT_RESUBSCRIBES)
-          stream.cancelRetry = retryAfter(options.retryMs ?? 1000, () =>
-            openDocs(conversation, kinds, withView),
-          )
-      },
+      (status) => retryDocs(conversation, stream, status),
+    )
+  }
+  function retryDocs(conversation: ConversationId, stream: DocStream, status: number) {
+    if (status === STREAM_GONE_RECONNECT_RESUBSCRIBES) return
+    stream.cancelRetry?.()
+    stream.cancelRetry = retryAfter(options.retryMs ?? 1000, () =>
+      openDocs(conversation, stream.kinds, stream.view),
     )
   }
   function closeDocs(conversation: ConversationId) {
@@ -389,8 +504,16 @@ export function createStore(options: StoreOptions = {}) {
       const stream = sharedSubscriptionsByConversation.get(conversation)
       const view = watchedViews.has(conversation)
 
-      const changedWatchesNeedFreshSnapshot = stream?.kinds !== list || stream.view !== view
-      if (changedWatchesNeedFreshSnapshot) openDocs(conversation, list, view)
+      if (!stream) openDocs(conversation, list, view)
+      else if (stream.kinds !== list || stream.view !== view) {
+        stream.kinds = list
+        stream.view = view
+        updateSubscription(
+          stream.sub,
+          { conversation, docs: [...kinds.keys()].toSorted(), view },
+          (status) => retryDocs(conversation, stream, status),
+        )
+      }
 
       const current = state.docsOf[conversation] ?? {}
       docsOf[conversation] = Object.keys(current).every((kind) => kinds.has(kind))
@@ -440,6 +563,7 @@ export function createStore(options: StoreOptions = {}) {
       cancelSync?.()
 
       streamId = undefined
+      resetSubscriptionRequests()
       for (const conversation of sharedSubscriptionsByConversation.keys()) closeDocs(conversation)
       unsubscribe(main)
       main = undefined
@@ -458,6 +582,7 @@ export function createStore(options: StoreOptions = {}) {
         restored: kept !== undefined,
         docs: {},
       })
+      subscriptionLane.promote()
       scheduleMain()
     },
 
@@ -481,8 +606,6 @@ export function createStore(options: StoreOptions = {}) {
         if (left > 0) docKinds.set(kind, left)
         else {
           docKinds.delete(kind)
-          const { [kind]: _removed, ...docs } = state.docs
-          set({ docs })
           scheduleMain()
         }
       }

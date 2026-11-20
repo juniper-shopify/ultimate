@@ -110,7 +110,7 @@ async function catchupFixture() {
   return { server, projectRoot, requests, open, release: () => gate.resolve(), held: () => held }
 }
 
-it('catches up once on an idle resume, puts overlap first, and reads it before the input', async () => {
+it('catches up once on an idle resume, lists recent landings, and reads them before the input', async () => {
   const f = await catchupFixture()
   const seen = await f.server.harness.snapshot(Seen, ROOT_CONVERSATION_ID, context)
   expect(seen?.main).toBe(repoGit(f.projectRoot, 'rev-parse', 'main'))
@@ -131,9 +131,10 @@ it('catches up once on an idle resume, puts overlap first, and reads it before t
   expect(notes).toHaveLength(1)
   const text = (notes[0].data as { text: string }).text
   expect(text).toContain('2 commits landed on main')
-  expect(text).toMatch(/\*\*Overlap\*\* .*Fix schema · #1 edit schema/)
-  expect(text).toContain('`schema.ts`')
-  expect(text.indexOf('Fix schema')).toBeLessThan(text.indexOf('Add something unrelated'))
+  expect(text).toMatch(/Fix schema · #1 edit schema/)
+  expect(text).not.toContain('**Overlap**')
+  expect(text).not.toContain('`schema.ts`')
+  expect(text.indexOf('Add something unrelated')).toBeLessThan(text.indexOf('Fix schema'))
   expect(f.requests.at(-1)!.slice(-2)).toEqual([text, 'continue work'])
   const view = await f.server.root.context(context)
   const resumed = view.entries.find((entry) =>
@@ -270,7 +271,7 @@ it('counts a merged upstream as the one merge that landed it, not its every comm
   expect(text).not.toContain('up1.ts')
 })
 
-it('warns an isolated workspace it is behind, prioritizes old overlaps, and caps the rows at 30', async () => {
+it('lists the latest 30 landings without overlap marks or workspace-behind advice', async () => {
   const f = await catchupFixture()
   await ask(f.server, ROOT_CONVERSATION_ID, 'An idea')
   const { id } = (
@@ -293,10 +294,13 @@ it('warns an isolated workspace it is behind, prioritizes old overlaps, and caps
   expect(notes).toHaveLength(1)
   const text = (notes[0].data as { text: string }).text
   expect(text).toContain('32 commits landed on main')
-  expect(text.split('\n\n')[1]).toMatch(/^- \*\*Overlap\*\* .*Old overlap.*schema.ts/)
+  expect(text.split('\n\n')[1]).toMatch(/^- .*Other 30$/)
+  expect(text).not.toContain('Old overlap')
+  expect(text).not.toContain('**Overlap**')
+  expect(text).not.toContain('schema.ts')
   expect(text.split('\n\n').filter((row) => row.startsWith('- '))).toHaveLength(30)
   expect(text).toContain('and 2 more')
-  expect(text).toContain('Your workspace is 32 commits behind main; merge it before continuing.')
+  expect(text).not.toContain('Your workspace is')
 })
 
 const branchFrom = async (server: Server, args: Record<string, unknown>) => {

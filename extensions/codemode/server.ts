@@ -1,6 +1,7 @@
 import { parseConversationId, offsetEntryId } from '../../lib/ids.ts'
 import type {
   ConversationId,
+  EntryRecord,
   Cursor,
   JsonObject,
   ToolExecutionApi,
@@ -40,8 +41,9 @@ import type { ActionContext } from '../../server/actions.ts'
 import { READS, readProject } from './projects.ts'
 import { REMOTE_BYTES } from '../../lib/remote.ts'
 import type { Read } from './projects.ts'
-import { closedChapter, compactEntry, id, limit, readChapter, searchHit } from './chapters.ts'
+import { closedChapter, compactEntry, id, limit, readChapter, yieldTurn } from './chapters.ts'
 import type { EntriesOptions, HistoryRead, SearchOptions } from './chapters.ts'
+import { historyReads, searchHistory } from './history-reads.ts'
 import { ConversationsApi } from '../conversations/api.ts'
 import { MessagesApi } from '../messages/api.ts'
 import type { ResponseReceipt } from '../conversations/summary.ts'
@@ -99,6 +101,7 @@ function localReads(host: ExtensionHost, context: Context) {
       return items
     }, context)
   const entries = async (conversation: unknown, options: EntriesOptions = {}) => {
+    context.abortSignal?.throwIfAborted()
     const found = await host.harness().conversation(id(conversation), context)
     if (!found) throw new Error('Unknown conversation')
     const items: unknown[] = []
@@ -121,32 +124,35 @@ function localReads(host: ExtensionHost, context: Context) {
         if (items.length === count) return items
       }
       cursor = page.next
+      await yieldTurn(context.abortSignal)
     } while (cursor)
     return items
   }
   const search = async (text: unknown, options: SearchOptions = {}) => {
+    context.abortSignal?.throwIfAborted()
     if (typeof text !== 'string' || !text) throw new Error('search text must be nonempty')
     const count = limit(options.limit)
     const records =
       options.conversationId === undefined
         ? await conversations()
         : [{ id: id(options.conversationId) }]
-    const matches: unknown[] = []
-    for (const conversation of records) {
-      let cursor: Cursor | undefined
-      do {
-        const found = await host.harness().conversation(conversation.id, context)
-        if (!found) throw new Error('Unknown conversation')
-        const page = await found.entries({}, 100, cursor, context)
-        for (const entry of page.items) {
-          const hit = searchHit(entry, text, options)
-          if (hit) matches.push(hit)
-          if (matches.length === count) return matches
-        }
-        cursor = page.next
-      } while (cursor)
+    let firstPage: { items: readonly EntryRecord[]; more: boolean } | undefined
+    if (options.conversationId !== undefined) {
+      const found = await host.harness().conversation(records[0].id, context)
+      if (!found) throw new Error('Unknown conversation')
+      const page = await found.entries({}, 100, undefined, context)
+      firstPage = { items: page.items, more: page.next !== undefined }
     }
-    return matches
+    return searchHistory(
+      host,
+      {
+        database: host.chapter.database,
+        args: [text, { ...options, limit: count }],
+        conversations: records.map(({ id: conversationId }) => ({ id: conversationId })),
+      },
+      context.abortSignal,
+      firstPage,
+    )
   }
   const listed = async () => {
     const summaries = new Map(host.conversations().map((summary) => [summary.id, summary]))
@@ -171,7 +177,31 @@ function localReads(host: ExtensionHost, context: Context) {
     (op: HistoryRead, at: number, live: (args: unknown[]) => unknown) =>
     async (args: unknown[]) => {
       const database = await closedChapter(host.home, host.chapter.name, args[at])
-      return database ? readChapter(database, op, args) : live(args)
+      if (database && op === 'search') {
+        if (typeof args[0] !== 'string' || !args[0]) throw new Error('search text must be nonempty')
+        const options = (args[1] ?? {}) as SearchOptions
+        limit(options.limit)
+        let firstPage: { items: readonly EntryRecord[]; more: boolean } | undefined
+        let records: { id: ConversationId }[] | undefined
+        if (options.conversationId !== undefined) {
+          const conversationId = id(options.conversationId)
+          const items = (await readChapter(
+            database,
+            'entries',
+            [conversationId, { limit: 101, full: true }],
+            context.abortSignal,
+          )) as EntryRecord[]
+          firstPage = { items: items.slice(0, 100), more: items.length > 100 }
+          records = [{ id: conversationId }]
+        }
+        return searchHistory(
+          host,
+          { database, args, conversations: records },
+          context.abortSignal,
+          firstPage,
+        )
+      }
+      return database ? readChapter(database, op, args, context.abortSignal) : live(args)
     }
   return {
     conversations: history('conversations', 0, () => listed()),
@@ -234,7 +264,7 @@ function globals(
         )
         if (remote) return remote.value
       }
-      return reads[op](args)
+      return localReads(host, withAbortSignal(signal, context))[op](args)
     }
   const helpers: {
     name: string
@@ -456,6 +486,7 @@ export const actions = {
 }
 
 export default function codemode(host: ExtensionHost) {
+  historyReads(host)
   const globalDeclarations = globals(host, ROOT_CONVERSATION_ID, BACKGROUND_CONTEXT).filter(
     (global) => global.name !== 'ultimate.tell',
   )

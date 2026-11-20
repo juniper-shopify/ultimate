@@ -227,6 +227,8 @@ pnpm test:e2e                     # tests that spawn real supervisors and instan
 pnpm test extensions/<name>/      # one extension's tests (they live in its test/ folder)
 ```
 
+For synthetic fleet-size stream and page-load measurements, see the [fleet benchmark](test/e2e/fleet-benchmark/README.md).
+
 ## License
 
 [MIT](LICENSE).

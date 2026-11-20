@@ -593,6 +593,18 @@ describe('conversation state', () => {
     expect(conversationState({ ...branch, runState: 'error' }, log)).toBe('failed')
   })
 
+  it('does not report idle while a mounted branch waits for its starter document', () => {
+    const branch = { id: 5, kind: 'other' as const, starter: null }
+    const log = { messages: [], next: 1 }
+    expect(conversationState(branch, log)).toBe('awaiting')
+    expect(waitLabel(conversationWait(branch, log))).toBe('loading…')
+    expect(conversationState({ ...branch, starter: 3 }, log)).toBe('awaiting')
+    expect(waitLabel(conversationWait({ ...branch, starter: 3 }, log))).toBe('waits on #3')
+    expect(conversationState({ ...branch, starter: undefined }, log)).toBe('idle')
+    expect(conversationState({ ...branch, busy: true }, log)).toBe('working')
+    expect(conversationState({ ...branch, runState: 'error' }, log)).toBe('failed')
+  })
+
   it('owes branches it started only when they wait on it, without duplicating their messages', () => {
     const messages = messagesLog({ from: 5 as ConversationId, to: 3 as ConversationId }).messages
     const branch = { id: 5, starter: 3 }

@@ -210,6 +210,7 @@ export interface ServerEvents {
   stream: StreamHandshakeBeforeSubscriptions
   system: SystemInfo
   conversations: ConversationSummary[]
+  conversationsUpsert: ConversationSummary[]
   view: StreamedView
   ops: readonly Op[]
   ui: { value: Readonly<Record<string, JsonValue>> }
@@ -217,5 +218,6 @@ export interface ServerEvents {
   doc: { kind: string; value: Readonly<JsonObject> | null }
   docOps: { kind: string; ops: readonly Op[] }
   tasks: TaskGraph
+  tasksOps: { ops: readonly Op[] }
   notice: Notice
 }
