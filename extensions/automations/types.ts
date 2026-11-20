@@ -64,6 +64,7 @@ export type Automation = {
   model?: { provider: string; modelId: string }
   thinking?: ModelThinkingLevel
   subscribers: Subscriber[]
+  createdBy?: ConversationId
   branches?: { ids: ConversationId[]; by: ConversationId }
   nextAt?: number
   scheduler?: TaskId

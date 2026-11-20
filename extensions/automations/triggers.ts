@@ -79,6 +79,34 @@ export function describeTrigger(a: Automation): string {
   return a.script!.state
 }
 
+export function automationsSection(
+  automations: (Automation & { serves?: { by: ConversationId } })[],
+  standing: Record<string, ConversationId>,
+  conversationId: ConversationId,
+  canListTheRest: boolean,
+): string {
+  const addresses = new Set<string | number>([conversationId, `#${conversationId}`])
+  for (const [name, id] of Object.entries(standing))
+    if (id === conversationId) addresses.add(`@${name}`)
+  const onlyOwnSoOthersChangesResendNothing = (a: (typeof automations)[number]) =>
+    a.enabled &&
+    (a.createdBy === conversationId ||
+      a.subscribers.some((subscriber) => addresses.has(subscriber)) ||
+      (a.condition !== undefined && addresses.has(a.condition.of)) ||
+      a.serves?.by === conversationId ||
+      a.branches?.by === conversationId ||
+      a.script?.conversationId === conversationId)
+  const lines = automations
+    .filter(onlyOwnSoOthersChangesResendNothing)
+    .map((a) => `${a.id} ${a.name}: ${describeTrigger(a)}`)
+  if (canListTheRest)
+    lines.unshift(
+      'Yours: the ones you created, that wake you or that watch you. automation {action: "list"} shows the others.',
+    )
+  const orderedEmptySection = ''
+  return lines.length ? `<automations>\n${lines.join('\n')}\n</automations>` : orderedEmptySection
+}
+
 export const hours = (ms: number) =>
   ms % 3600_000 === 0 || ms >= 10 * 3600_000
     ? `${Math.round((ms / 3600_000) * 10) / 10}h`

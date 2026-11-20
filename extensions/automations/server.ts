@@ -53,7 +53,7 @@ import {
 } from './refs.ts'
 import { describeSchedule, nextAt, parseSchedule } from './schedule.ts'
 import { scheduler } from './scheduler.ts'
-import { triggers, TRIGGER_EVENTS, describeTrigger } from './triggers.ts'
+import { automationsSection, triggers, TRIGGER_EVENTS, describeTrigger } from './triggers.ts'
 import { supervisor } from './supervisor.ts'
 import type { Prepared } from './supervisor.ts'
 import type {
@@ -390,6 +390,7 @@ function backend(host: ExtensionHost) {
           ...(args.secrets ? { secrets: args.secrets } : {}),
         },
         subscribers,
+        ...(caller === undefined ? {} : { createdBy: caller }),
         ...runProfile,
         createdAt: now,
         updatedAt: now,
@@ -596,6 +597,7 @@ function backend(host: ExtensionHost) {
         fires: 0,
         ...(args.key ? { key: args.key } : {}),
         subscribers,
+        ...(caller === undefined ? {} : { createdBy: caller }),
         ...(await owedAtCreation(tx, id, subscribers, runBy)),
       }
     }
@@ -868,15 +870,15 @@ export default function automations(host: ExtensionHost) {
     sections: [
       section(
         'automations',
-        async ({ read }, context) => {
+        async ({ read, conversationId, agent }, context) => {
           const state = await read.snapshot(Automations, context)
-          const lines = Object.values(state?.automations ?? {})
-            .filter((a) => a.enabled)
-            .map((a) => `${a.id} ${a.name}: ${describeTrigger(a)}`)
-          const orderedEmptySection = ''
-          return lines.length
-            ? `<automations>\n${lines.join('\n')}\n</automations>`
-            : orderedEmptySection
+          const standing = await read.snapshot(Standing, ROOT_CONVERSATION_ID, context)
+          return automationsSection(
+            Object.values(state?.automations ?? {}),
+            standing ?? {},
+            conversationId,
+            agent.tools.some((tool) => tool.name === 'automation'),
+          )
         },
         { tag: false },
       ),
