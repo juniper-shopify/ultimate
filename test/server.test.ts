@@ -990,7 +990,7 @@ export const actions = { list: async (_args, ctx) => ctx.host.conversations() }`
     await until(() =>
       stream.events.some(
         (event) =>
-          event.name === 'conversations' &&
+          (event.name === 'conversations' || event.name === 'conversationsUpsert') &&
           (event.data as ConversationSummary[]).some(
             (item) => item.id === created && item.answerAt === 2000,
           ),

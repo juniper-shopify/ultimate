@@ -210,6 +210,7 @@ export interface ServerEvents {
   stream: StreamHandshakeBeforeSubscriptions
   system: SystemInfo
   conversations: ConversationSummary[]
+  conversationsUpsert: ConversationSummary[]
   view: StreamedView
   ops: readonly Op[]
   ui: { value: Readonly<Record<string, JsonValue>> }
