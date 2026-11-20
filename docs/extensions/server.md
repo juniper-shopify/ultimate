@@ -12,7 +12,8 @@ the previous version installed. Besides the extension it may export `docs` ([doc
 ## Order and prompt sections
 
 Server facets may `export const order = -100`: lower values come first, with the default 0 keeping discovery order
-(built-in → user → project, then folder name); changing it reorders the server prompt and tools once.
+(built-in → user → project, then folder name); changing it reorders the server prompt and tools once. Settings reuse
+the ordered extension list until the registry, order or source changes; each read receives its own array.
 
 Prompt sections stay stable between turns: the same conversation renders the same text every time, so the prompt
 stays cached. Anything that changes while a conversation runs (a count, a list, a time) goes in a per-input note

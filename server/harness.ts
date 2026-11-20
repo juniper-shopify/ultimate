@@ -114,6 +114,26 @@ export interface HostOptions {
   faux?: FauxProviderHandle
   report?: (notice: Notice) => void
 }
+class ExtensionOrderMap<T> extends Map<string, T> {
+  #revision = 0
+  get revision() {
+    return this.#revision
+  }
+  override set(name: string, value: T) {
+    if (!this.has(name) || this.get(name) !== value) this.#revision++
+    return super.set(name, value)
+  }
+  override delete(name: string) {
+    const removed = super.delete(name)
+    if (removed) this.#revision++
+    return removed
+  }
+  override clear() {
+    if (this.size) this.#revision++
+    super.clear()
+  }
+}
+
 export async function prepareHarness(options: HostOptions) {
   const { ultimateRoot } = options
   const projectRoot = await realpath(options.projectRoot ?? ultimateRoot)
@@ -127,8 +147,34 @@ export async function prepareHarness(options: HostOptions) {
   applyHttpProxySettings(settings.getGlobalSettings().httpProxy)
   configureHttpDispatcher(settings.getHttpIdleTimeoutMs())
   const registry = createRegistry()
-  const extensionOrders = new Map<string, number>()
-  const extensionSources = new Map<string, Source>()
+  const extensionOrders = new ExtensionOrderMap<number>()
+  const extensionSources = new ExtensionOrderMap<Source>()
+  let orderedSnapshot: ReturnType<typeof registry.snapshot> | undefined
+  let orderedRevision = -1
+  let ordered: Extension[] = []
+  const orderedExtensions = () => {
+    const snapshot = registry.snapshot()
+    const revision = extensionOrders.revision + extensionSources.revision
+    if (snapshot !== orderedSnapshot || revision !== orderedRevision) {
+      ordered = snapshot.installed().toSorted((a, b) =>
+        compareExtensions(
+          {
+            name: a.name,
+            source: extensionSources.get(a.name) ?? 'builtin',
+            order: extensionOrders.get(a.name),
+          },
+          {
+            name: b.name,
+            source: extensionSources.get(b.name) ?? 'builtin',
+            order: extensionOrders.get(b.name),
+          },
+        ),
+      )
+      orderedSnapshot = snapshot
+      orderedRevision = revision
+    }
+    return ordered.slice()
+  }
   const envs = new Map<string, NodeExecutionEnv>()
   const processHelperExecutionEnv = ({ cwd = projectRoot }: EnvTarget) => {
     let found = envs.get(cwd)
@@ -231,25 +277,7 @@ export async function prepareHarness(options: HostOptions) {
           {
             models: guardedRuntime,
             registry,
-            settings: createHarnessSettings(settings, contextWindow, () =>
-              registry
-                .snapshot()
-                .installed()
-                .toSorted((a, b) =>
-                  compareExtensions(
-                    {
-                      name: a.name,
-                      source: extensionSources.get(a.name) ?? 'builtin',
-                      order: extensionOrders.get(a.name),
-                    },
-                    {
-                      name: b.name,
-                      source: extensionSources.get(b.name) ?? 'builtin',
-                      order: extensionOrders.get(b.name),
-                    },
-                  ),
-                ),
-            ),
+            settings: createHarnessSettings(settings, contextWindow, orderedExtensions),
             env: processHelperExecutionEnv,
             onReport: (report) =>
               options.report?.({ level: 'error', message: reportMessage(report) }),
