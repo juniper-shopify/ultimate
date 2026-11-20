@@ -128,6 +128,7 @@ export function createStore(options: StoreOptions = {}) {
 
   let streamId: string | undefined
   const handlers = new Map<number, Handler>()
+  const pendingSubscriptions = new Map<number, Promise<void>>()
   let nextSub = 0
   let main: number | undefined
   let opened = false
@@ -243,25 +244,39 @@ export function createStore(options: StoreOptions = {}) {
   ) {
     const sub = ++nextSub
     handlers.set(sub, handler)
+    updateSubscription(sub, spec, failed)
+    return sub
+  }
+  function updateSubscription(
+    sub: number,
+    spec: { conversation?: ConversationId; docs: string[]; view: boolean },
+    failed: (status: number) => void,
+  ) {
     const stream = streamId
-    if (stream === undefined) return sub
+    if (stream === undefined) return
     const refused = (status: number) => {
       if (handlers.has(sub) && streamId === stream) failed(status)
     }
-    void request(`/api/events/${stream}/${sub}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(spec),
-    }).then(
-      (response) => {
-        if (!response.ok) refused(response.status)
-      },
-      () => refused(0),
-    )
-    return sub
+    const send = () => {
+      if (!handlers.has(sub) || streamId !== stream) return Promise.resolve()
+      return request(`/api/events/${stream}/${sub}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(spec),
+      }).then(
+        (response) => {
+          if (!response.ok) refused(response.status)
+        },
+        () => refused(0),
+      )
+    }
+    const pending = pendingSubscriptions.get(sub)
+    pendingSubscriptions.set(sub, pending ? pending.then(send) : send())
   }
   function unsubscribe(sub: number | undefined) {
-    if (sub === undefined || !handlers.delete(sub) || streamId === undefined) return
+    if (sub === undefined) return
+    pendingSubscriptions.delete(sub)
+    if (!handlers.delete(sub) || streamId === undefined) return
     request(`/api/events/${streamId}/${sub}`, { method: 'DELETE' }).catch(meansNone)
   }
 
@@ -320,6 +335,7 @@ export function createStore(options: StoreOptions = {}) {
         } else if (name === 'stream') {
           streamId = (JSON.parse(raw) as ServerEvents['stream']).id
           handlers.clear()
+          pendingSubscriptions.clear()
           openMain()
 
           const subscriptionsBeforeReopen = Array.from(sharedSubscriptionsByConversation)
@@ -363,12 +379,14 @@ export function createStore(options: StoreOptions = {}) {
         const next = applyDoc(docs, change)
         if (next !== docs) set({ docsOf: { ...state.docsOf, [conversation]: next } })
       },
-      (status) => {
-        if (status !== STREAM_GONE_RECONNECT_RESUBSCRIBES)
-          stream.cancelRetry = retryAfter(options.retryMs ?? 1000, () =>
-            openDocs(conversation, kinds, withView),
-          )
-      },
+      (status) => retryDocs(conversation, stream, status),
+    )
+  }
+  function retryDocs(conversation: ConversationId, stream: DocStream, status: number) {
+    if (status === STREAM_GONE_RECONNECT_RESUBSCRIBES) return
+    stream.cancelRetry?.()
+    stream.cancelRetry = retryAfter(options.retryMs ?? 1000, () =>
+      openDocs(conversation, stream.kinds, stream.view),
     )
   }
   function closeDocs(conversation: ConversationId) {
@@ -389,8 +407,16 @@ export function createStore(options: StoreOptions = {}) {
       const stream = sharedSubscriptionsByConversation.get(conversation)
       const view = watchedViews.has(conversation)
 
-      const changedWatchesNeedFreshSnapshot = stream?.kinds !== list || stream.view !== view
-      if (changedWatchesNeedFreshSnapshot) openDocs(conversation, list, view)
+      if (!stream) openDocs(conversation, list, view)
+      else if (stream.kinds !== list || stream.view !== view) {
+        stream.kinds = list
+        stream.view = view
+        updateSubscription(
+          stream.sub,
+          { conversation, docs: [...kinds.keys()].toSorted(), view },
+          (status) => retryDocs(conversation, stream, status),
+        )
+      }
 
       const current = state.docsOf[conversation] ?? {}
       docsOf[conversation] = Object.keys(current).every((kind) => kinds.has(kind))

@@ -38,6 +38,8 @@ every exported kind, which creates a missing document with its initial value, as
 Extensions read documents through the SDK (`useDoc`, `useDocOf`; see [contracts](contracts.md)), never the stream
 itself. Their `doc` snapshots and `docOps` batches come from `/api/events`. A browser tab keeps one such stream; its
 first event, `stream`, carries the id with which `POST /api/events/<stream>/<sub>` (`{ conversation?, docs?, view? }`)
-subscribes to a conversation and `DELETE` ends that (`ServerEvents` in `shared/protocol.ts`). A subscription's
+subscribes to a conversation and `DELETE` ends that (`ServerEvents` in `shared/protocol.ts`). Posting again updates
+that subscription's kinds and view requirement, snapshotting only added watches; `useDocOf` and `ConversationScope`
+share these updates without restarting retained watches. A new stream still subscribes in full. A subscription's
 `view`, `ops`, `doc` and `docOps` events carry its id on their first data line, so their `data` reads `<sub>\n{…}`:
 parse what follows the first newline.
