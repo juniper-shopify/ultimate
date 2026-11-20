@@ -22,7 +22,10 @@ import type { OpenHost, PreparedHost } from './harness.ts'
 import type { createSystem } from './system.ts'
 import { requestSwap } from './supervisor-protocol.ts'
 import { UiState } from '../shared/ui-state.ts'
+import { copyJson } from '@earendil-works/chord/json'
 import type { JsonValue } from '@earendil-works/chord/json'
+import { PendingOps } from '@earendil-works/chord/delta'
+import type { Op } from '@earendil-works/chord/delta'
 import { clampThinkingLevel, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import { Metadata } from './metadata.ts'
 import { EVENT_LOG_LABEL, emit } from './events.ts'
@@ -182,14 +185,14 @@ export async function createApi(
   const { harness, root } = opened
   const streams = new Set<() => Promise<void>>()
   const connections = new Map<string, Connection>()
-  let onGraph = () => {}
+  let onGraph: (ops: readonly Op[]) => void = () => {}
   const latestCommitGraph: { tasks?: TaskGraph } = {}
   const graph = await harness.observeTaskGraph(
     {
       advance: (call) => {
         if (call.kind !== 'value') return
         latestCommitGraph.tasks = call.value
-        onGraph()
+        onGraph(call.ops)
       },
       end: () => {},
     },
@@ -270,22 +273,26 @@ export async function createApi(
   lastConversations = JSON.stringify(summaries)
   if (summaries.length) events.emit('conversations', summaries)
   projectIndex.update(summaries)
-  let lastGraph = JSON.stringify(tasks())
+  let publishedGraph = tasks()
+  const pendingGraph = new PendingOps()
   const scheduleGraph = batch(taskGraphBroadcastIntervalMs, () => {
-    const graphJson = JSON.stringify(tasks())
-    if (graphJson !== lastGraph) {
-      lastGraph = graphJson
-      events.emit('tasks', tasks())
-      const busy = busyConversations(tasks())
-      const next = summaries.map((summary) => ({ ...summary, busy: busy.has(summary.id) }))
-      if (JSON.stringify(next) !== JSON.stringify(summaries)) {
-        summaries = next
-        scheduleConversations()
-      }
+    const pending = pendingGraph.take()
+    if (pending.kind === 'ops' && !pending.ops.length) return
+    publishedGraph = tasks()
+    events.emit('tasksOps', {
+      ops: pending.kind === 'replace' ? [['r', copyJson(publishedGraph)]] : pending.ops,
+    })
+    const busy = busyConversations(publishedGraph)
+    const next = summaries.map((summary) => ({ ...summary, busy: busy.has(summary.id) }))
+    if (JSON.stringify(next) !== JSON.stringify(summaries)) {
+      summaries = next
+      scheduleConversations()
     }
   })
-  onGraph = () => {
-    if (!closed) scheduleGraph()
+  onGraph = (ops) => {
+    if (closed) return
+    pendingGraph.push(ops)
+    scheduleGraph()
   }
   const unsubscribe = onCommit(harness, (publication) => {
     if (closed) return
@@ -328,7 +335,7 @@ export async function createApi(
     ui!.start(async (call) => {
       if (call.kind === 'value') send('uiOps', { ops: call.ops })
     })
-    send('tasks', tasks())
+    send('tasks', publishedGraph)
     events.listeners.add(send)
     const stop = async () => {
       if (connection.ended) return
