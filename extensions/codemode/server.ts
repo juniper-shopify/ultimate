@@ -107,6 +107,7 @@ function localReads(host: ExtensionHost, context: Context) {
       return items
     }, context)
   const entries = async (conversation: unknown, options: EntriesOptions = {}) => {
+    context.abortSignal?.throwIfAborted()
     const found = await host.harness().conversation(id(conversation), context)
     if (!found) throw new Error('Unknown conversation')
     const items: unknown[] = []
@@ -129,11 +130,12 @@ function localReads(host: ExtensionHost, context: Context) {
         if (items.length === count) return items
       }
       cursor = page.next
-      await yieldTurn()
+      await yieldTurn(context.abortSignal)
     } while (cursor)
     return items
   }
   const search = async (text: unknown, options: SearchOptions = {}) => {
+    context.abortSignal?.throwIfAborted()
     if (typeof text !== 'string' || !text) throw new Error('search text must be nonempty')
     const count = limit(options.limit)
     const records =
@@ -150,7 +152,7 @@ function localReads(host: ExtensionHost, context: Context) {
         const page = await found.entries({}, 100, cursor, context)
         for (const entry of page.items) {
           if (performance.now() - slice >= 4) {
-            await yieldTurn()
+            await yieldTurn(context.abortSignal)
             slice = performance.now()
           }
           const hit = searchHit(entry, text, options)
@@ -158,7 +160,7 @@ function localReads(host: ExtensionHost, context: Context) {
           if (matches.length === count) return matches
         }
         cursor = page.next
-        await yieldTurn()
+        await yieldTurn(context.abortSignal)
         slice = performance.now()
       } while (cursor)
     }
@@ -187,7 +189,7 @@ function localReads(host: ExtensionHost, context: Context) {
     (op: HistoryRead, at: number, live: (args: unknown[]) => unknown) =>
     async (args: unknown[]) => {
       const database = await closedChapter(host.home, host.chapter.name, args[at])
-      return database ? readChapter(database, op, args) : live(args)
+      return database ? readChapter(database, op, args, context.abortSignal) : live(args)
     }
   return {
     conversations: history('conversations', 0, () => listed()),
@@ -250,7 +252,7 @@ function globals(
         )
         if (remote) return remote.value
       }
-      return reads[op](args)
+      return localReads(host, withAbortSignal(signal, context))[op](args)
     }
   const helpers: {
     name: string
