@@ -2,7 +2,10 @@
 
 Discovery is clone built-ins, then `~/.ultimate/`, then `<project>/.ultimate/`; later names replace earlier ones.
 Enabled extensions may ship `agents/` definitions, loaded as built-ins before user and project definitions or overlays.
-Disabling the extension removes its definitions too.
+Disabling the extension removes its definitions too. Agent discovery reuses a reading while definition files,
+agent directories, settings, families and trust keep their file state; edits, additions and removals are seen on the
+next call. Other changes (such as a new agents folder inside an existing extension or a model login) are picked up
+within ten seconds. Callers receive independent copies; reading an overlay's base bypasses the cache.
 Skills ([Agent Skills](https://agentskills.io) folders with a `SKILL.md`, as Pi loads them) come from clone `skills/`, the
 project's `.pi/skills/`, `~/.ultimate/skills/`, then, once the project is trusted, its `.agents/skills/` and
 `.ultimate/skills/`; a later scope overrides an earlier skill of the same name. Every agent's
