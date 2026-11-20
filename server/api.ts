@@ -203,13 +203,11 @@ export async function createApi(
   let closed = false
   let summaries: ConversationSummary[] = []
   const projectIndex = conversationIndex(host.home)
-  let lastConversations = ''
+  const changedConversationIds = new Set<ConversationId>()
   const broadcastConversations = batch(conversationListBroadcastIntervalMs, () => {
-    const next = JSON.stringify(summaries)
-    if (next !== lastConversations) {
-      lastConversations = next
-      events.emit('conversations', summaries)
-    }
+    const changed = summaries.filter((row) => changedConversationIds.has(row.id))
+    changedConversationIds.clear()
+    if (changed.length) events.emit('conversationsUpsert', changed)
   })
   function scheduleConversations() {
     projectIndex.update(summaries)
@@ -260,6 +258,11 @@ export async function createApi(
     for (const fresh of refreshed) {
       const summary = { ...fresh, busy: busy.has(fresh.id) }
       const index = summariesIncludingConcurrentUpdates.findIndex((item) => item.id === summary.id)
+      if (
+        index < 0 ||
+        JSON.stringify(summariesIncludingConcurrentUpdates[index]) !== JSON.stringify(summary)
+      )
+        changedConversationIds.add(summary.id)
       if (index < 0) summariesIncludingConcurrentUpdates.push(summary)
       else summariesIncludingConcurrentUpdates[index] = summary
     }
@@ -270,7 +273,7 @@ export async function createApi(
   }
   await refreshConversations()
   broadcastConversations.cancel()
-  lastConversations = JSON.stringify(summaries)
+  changedConversationIds.clear()
   if (summaries.length) events.emit('conversations', summaries)
   projectIndex.update(summaries)
   let publishedGraph = tasks()
@@ -283,7 +286,11 @@ export async function createApi(
       ops: pending.kind === 'replace' ? [['r', copyJson(publishedGraph)]] : pending.ops,
     })
     const busy = busyConversations(publishedGraph)
-    const next = summaries.map((summary) => ({ ...summary, busy: busy.has(summary.id) }))
+    const next = summaries.map((summary) => {
+      const isBusy = busy.has(summary.id)
+      if (isBusy !== summary.busy) changedConversationIds.add(summary.id)
+      return { ...summary, busy: isBusy }
+    })
     if (JSON.stringify(next) !== JSON.stringify(summaries)) {
       summaries = next
       scheduleConversations()
