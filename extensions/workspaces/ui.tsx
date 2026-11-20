@@ -4,7 +4,13 @@
  * landing or a branch, the point that adds a line about a conversation's landed `sha` to its landing card, and one that adds to
  * every successful landing card by the landed branch's id (`LandingExtras`).
  */
-export { stateLabel, useWorkspaceConversations, useWorkspaceIndex, useWorkspaces } from './data.tsx'
+export {
+  stateLabel,
+  useWorkspace,
+  useWorkspaceConversations,
+  useWorkspaceIndex,
+  useWorkspaces,
+} from './data.tsx'
 export type { WorkspaceConversation } from './data.tsx'
 export { LanderReportEntry } from './refs.ts'
 export {
