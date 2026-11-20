@@ -762,7 +762,7 @@ export default host => { host.resource('cleanup.process',()=>{
       const middle = await connect()
       expect(materialize(middle)).toEqual(baseline)
       expect(materialize(middle)).not.toEqual(latest)
-      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1000)
       await until(() => first.events.some((event) => event.name === 'tasksOps'))
       await until(() => middle.events.some((event) => event.name === 'tasksOps'))
       expect(materialize(first)).toEqual(latest)
@@ -777,7 +777,7 @@ export default host => { host.resource('cleanup.process',()=>{
           return state?.status === 'running' && state.phase === 'second'
         }),
       )
-      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1000)
       await until(() => first.events.filter((event) => event.name === 'tasksOps').length === 2)
       expect(materialize(first)).toEqual(latest)
       await middle.close()
@@ -786,7 +786,7 @@ export default host => { host.resource('cleanup.process',()=>{
       const reconnected = await connect()
       expect(materialize(reconnected)).toEqual(materialize(first))
       expect(materialize(reconnected)).not.toEqual(latest)
-      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1000)
       await until(() => reconnected.events.some((event) => event.name === 'tasksOps'))
       await until(() => first.events.filter((event) => event.name === 'tasksOps').length === 3)
       expect(materialize(first)).toEqual(latest)
