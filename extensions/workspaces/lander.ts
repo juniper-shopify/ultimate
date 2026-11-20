@@ -162,6 +162,11 @@ export const limitsFor = (check: Check, limits: CheckLimits): CheckLimits =>
   check.timeout === undefined
     ? limits
     : { stall: Math.min(limits.stall, check.timeout), total: check.timeout }
+const checkIdentity = (check: Check) =>
+  createHash('sha256')
+    .update(JSON.stringify([check.command, check.timeout ?? null]))
+    .digest('hex')
+    .slice(0, 16)
 const vitestFailureLine = /^\s*(FAIL|×|✗)\s/
 const seconds = (value: number) => (value < 60 ? `${value} s` : `${+(value / 60).toFixed(1)} min`)
 
@@ -930,7 +935,7 @@ export function createLander(
                   limitsFor(members[member], limits),
                 )
               const runCheckWithOneDurableRerun = async (command: string, member: number) => {
-                const attemptMemoKey = `check:${id}:${attempt}:${Array.isArray(group) ? `${position}.${member}` : position}`
+                const attemptMemoKey = `check:${id}:${attempt}:${Array.isArray(group) ? `${position}.${member}` : position}:${checkIdentity(members[member])}`
                 let memoizedFirstRun = await runtime.memo<'passed' | 'failed'>(
                   attemptMemoKey,
                   context,
@@ -1361,7 +1366,7 @@ export function createLander(
               const members = Array.isArray(group) ? group : [group]
               const results = await Promise.allSettled(
                 members.map(async (check, member) => {
-                  const checkKey = `check:${key}:${position}.${member}`
+                  const checkKey = `check:${key}:${position}.${member}:${checkIdentity(check)}`
                   for (const run of [0, 1]) {
                     let result = await runtime.memo<{ failure?: string }>(
                       `${checkKey}:${run}`,

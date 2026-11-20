@@ -249,3 +249,151 @@ it('lands each member again when its interrupted batch push was rewound off the 
   expect(f.pushed).toHaveLength(3)
   expect(f.pushed).not.toContain(f.interrupted!.union)
 })
+
+for (const batch of [1, 2])
+  for (const changed of ['command', 'timeout'] as const)
+    it(`batch ${batch}: reruns a passed check whose ${changed} changed during a restart`, async () => {
+      const directory = await temp('ultimate-check-replay-')
+      const source = join(directory, 'source')
+      const bare = join(directory, 'remote.git')
+      const trace = join(directory, 'trace')
+      const started = join(directory, 'second-check-started')
+      const gate = join(directory, 'second-check-gate')
+      const altered = join(directory, 'altered')
+      await mkdir(source)
+      await git(source, 'init', '-b', 'main')
+      await git(source, 'commit', '--allow-empty', '-m', 'base')
+      const base = await git(source, 'rev-parse', 'HEAD')
+      await git(directory, 'init', '--bare', bare)
+      await git(source, 'remote', 'add', 'origin', bare)
+      await git(source, 'push', '-q', 'origin', 'main')
+      await writeFile(trace, '')
+      await writeFile(
+        join(bare, 'hooks/pre-receive'),
+        `#!/bin/sh\nwhile read old new ref; do printf 'push %s\\n' "$new" >> '${trace}'; done\n`,
+        { mode: 0o755 },
+      )
+      const firstCommand = `echo FIRST >> '${trace}'; if test -f '${altered}'; then while :; do sleep 0.05; done; fi`
+      const second = {
+        command: `touch '${started}'; while test ! -f '${gate}'; do sleep 0.05; done`,
+        timeout: 60,
+      }
+      let settings = {
+        lander: { batch, checks: [{ command: firstCommand, timeout: 60 }, second], push: 'origin' },
+      }
+      const prepared = await prepareHarness({
+        projectRoot: source,
+        ultimateRoot: source,
+        home: join(directory, 'state'),
+        userHome: directory,
+        faux: fauxProvider(),
+      })
+      let opened: Awaited<ReturnType<typeof prepared.open>>
+      const events = eventLog(
+        () => opened.harness,
+        (_call, work) => work(),
+      )
+      const task = createLander(
+        {
+          home: prepared.home,
+          ultimateRoot: source,
+          harness: () => opened.harness,
+          projectSettings: async () => settings,
+          metadata: Metadata,
+          doc: () => undefined,
+          notice: (text) => {
+            throw new Error(text)
+          },
+          emit: events.emit,
+        },
+        Workspaces,
+        (_source, operation) => operation(),
+        {
+          starter: async () => undefined,
+          working: async () => true,
+          conclude: async () => {},
+          reserveLanding: async () => {},
+          retireLanding: async () => {},
+          submitLanding: async (tx, to, input) => {
+            await to.submit(tx, input)
+          },
+          release: async () => [],
+        },
+      )
+      prepared.registry.install(defineExtension({ name: 'check-replay-test', tasks: [task] }))
+      opened = await prepared.open()
+      cleanup.push(() => opened.close())
+      const at = await opened.harness.commit(
+        (tx) => tx.appendEntry(opened.root.id, { kind: 'test.branch-point', data: {} }),
+        context,
+      )
+      const members: { id: ConversationId; tip: string; path: string }[] = []
+      for (const name of ['one', 'two']) {
+        const branch = await opened.root.fork(at.id, { ownership: { kind: 'ownerless' } }, context)
+        const path = join(directory, name)
+        await git(source, 'worktree', 'add', '--detach', path, base)
+        await writeFile(join(path, `${name}.txt`), `${name}\n`)
+        await git(path, 'add', '.')
+        await git(path, 'commit', '-m', `${name} change`)
+        members.push({ id: branch.id, tip: await git(path, 'rev-parse', 'HEAD'), path })
+      }
+      await opened.harness.commit(async (tx) => {
+        const index = await tx.doc(Workspaces, ROOT_CONVERSATION_ID)
+        for (const member of members) {
+          index.items[String(member.id)] = {
+            source,
+            target: 'main',
+            base,
+            branch: `submission-${member.id}`,
+            path: member.path,
+            state: 'ready',
+          }
+          index.queue.push({
+            id: String(member.id),
+            conversationId: member.id,
+            source,
+            target: 'main',
+            tip: member.tip,
+            at: at.id,
+            divergence: 'None',
+            state: 'queued',
+            steps: [],
+          })
+        }
+        index.landers[source] = await tx.createTask(
+          task,
+          { source },
+          { conversationId: opened.root.id, ownership: { kind: 'conversation' } },
+        )
+      }, context)
+      await until(() =>
+        access(started).then(
+          () => true,
+          () => false,
+        ),
+      )
+      expect((await readFile(trace, 'utf8')).trim().split('\n')).toEqual(['FIRST'])
+      await opened.close()
+      const first =
+        changed === 'command'
+          ? { command: `echo REPLACED_CHECK; exit 1`, timeout: 60 }
+          : { command: firstCommand, timeout: 0.1 }
+      settings = { lander: { batch, checks: [first, second], push: 'origin' } }
+      await writeFile(altered, '')
+      await writeFile(gate, '')
+      opened = await prepared.open()
+      await until(async () => {
+        const index = await opened.harness.snapshot(Workspaces, ROOT_CONVERSATION_ID, context)
+        return index?.queue.length === 0 && Object.keys(index.landers).length === 0
+      })
+      expect(await readFile(trace, 'utf8')).not.toContain('push ')
+      expect(await git(source, 'rev-parse', 'main')).toBe(base)
+      expect(await git(bare, 'rev-parse', 'main')).toBe(base)
+      const index = (await opened.harness.snapshot(Workspaces, ROOT_CONVERSATION_ID, context))!
+      for (const member of members)
+        expect(index.results[String(member.id)]).toMatchObject({
+          outcome: 'failed',
+          reason: `check failed twice: ${first.command}`,
+          output: expect.stringContaining(changed === 'command' ? 'REPLACED_CHECK' : ' 0.1 s'),
+        })
+    })
