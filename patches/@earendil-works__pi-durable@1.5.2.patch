@@ -245,10 +245,18 @@ index 83e2a94a53bdd0fbcaa8d2513c6b79cb10afebcc..ca961878e45a9336ca52b71a9a9c4465
       * Why a live task cannot run here, if it cannot: its definition is missing, too old, or failed to migrate. A running
       * task, an abort-marked one, and one holding its outcome are never blocked.
 diff --git a/dist/harness/scheduler.js b/dist/harness/scheduler.js
-index df651a4f8f0769d10daee02292ea91380b158d5e..9096ca6c2b59a1cad3a1d61ae8819c768ff38326 100644
+index df651a4f8f0769d10daee02292ea91380b158d5e..58b2bd75ce68af4f8c22908ea175682c4dc52c4d 100644
 --- a/dist/harness/scheduler.js
 +++ b/dist/harness/scheduler.js
-@@ -185,6 +185,7 @@ export class TaskScheduler {
+@@ -163,6 +163,7 @@ export class TaskScheduler {
+     #abandoned = new Set();
+     /** Sleeping live tasks, due or not: the candidates of `#wakeDue()`. */
+     #sleeping = new Set();
++    #sleepDeadline;
+     /** Timer for the earliest sleep, without `onWake` while scheduling runs. */
+     #timer;
+     /** Last value given to `onWake`, so an unchanged one is not repeated. */
+@@ -185,6 +186,7 @@ export class TaskScheduler {
      #cascadePending = false;
      #unsubscribeRegistry = () => { };
      #enabled = false;
@@ -256,7 +264,7 @@ index df651a4f8f0769d10daee02292ea91380b158d5e..9096ca6c2b59a1cad3a1d61ae8819c76
      #readOnly;
      #closing = false;
      #dirty = false;
-@@ -213,6 +214,14 @@ export class TaskScheduler {
+@@ -213,6 +215,14 @@ export class TaskScheduler {
          this.#context = options.context;
          this.#readOnly = options.readOnly === true;
      }
@@ -271,7 +279,79 @@ index df651a4f8f0769d10daee02292ea91380b158d5e..9096ca6c2b59a1cad3a1d61ae8819c76
      /**
       * Load live tasks and change surviving `running` tasks back to `pending`, counting the restart. Dispatches nothing;
       * a task cut off `settings.restartLimit` times ends when it is next reserved. Read-only, it only loads them: a
-@@ -1774,6 +1783,8 @@ export class TaskScheduler {
+@@ -313,12 +323,15 @@ export class TaskScheduler {
+         // recovery. A process that dies before it lands must be woken again. A pass with nothing to do is not.
+         const active = this.#invocations.size > 0 || this.#reconcilingWork > 0 || this.#reconcileWork() || this.#runsNow(now);
+         // The earliest sleep not yet due: only `#sleeping` holds sleeping tasks, so no pass visits every live task.
+-        let at;
+-        for (const id of this.#sleeping) {
+-            const record = this.#live.get(id);
+-            const state = record?.state;
+-            if (state?.status === "sleeping" && !record.abortRequested && state.until > now) {
+-                at = at === undefined ? state.until : Math.min(at, state.until);
++        let { at } = this.#earliestSleep();
++        if (at !== undefined && !(at > now)) {
++            at = undefined;
++            for (const id of this.#sleeping) {
++                const record = this.#live.get(id);
++                const state = record?.state;
++                if (state?.status === "sleeping" && !record.abortRequested && state.until > now) {
++                    at = at === undefined ? state.until : Math.min(at, state.until);
++                }
+             }
+         }
+         return at === undefined ? { active } : { active, at };
+@@ -1272,7 +1285,8 @@ export class TaskScheduler {
+         if (record.state.status === "terminal") {
+             const node = nodeOf(record);
+             this.#live.delete(id);
+-            this.#sleeping.delete(id);
++            if (this.#sleeping.delete(id))
++                this.#sleepDeadline = undefined;
+             this.#intent.delete(id);
+             this.#runnable.delete(id);
+             this.#finalizeChecks.delete(id);
+@@ -1310,6 +1324,8 @@ export class TaskScheduler {
+             this.#sleeping.add(id);
+         else
+             this.#sleeping.delete(id);
++        if (previous?.state.status === "sleeping" || record.state.status === "sleeping")
++            this.#sleepDeadline = undefined;
+     }
+     /** The nearest live task above ended ordinary work may be free now: one holding its outcome, or an aborting one. */
+     #release(node, overlay) {
+@@ -1655,8 +1671,30 @@ export class TaskScheduler {
+         }, at - this.#now());
+         this.#timer = { at, disarm };
+     }
++    /** Raw deadlines, including due ones: a backward clock jump must not hide an earlier sleep. */
++    #earliestSleep() {
++        if (this.#sleepDeadline === undefined) {
++            let at;
++            let aborted = false;
++            for (const id of this.#sleeping) {
++                const record = this.#live.get(id);
++                const state = record?.state;
++                if (state?.status !== "sleeping")
++                    continue;
++                if (record.abortRequested)
++                    aborted = true;
++                else
++                    at = at === undefined ? state.until : Math.min(at, state.until);
++            }
++            this.#sleepDeadline = { at, aborted };
++        }
++        return this.#sleepDeadline;
++    }
+     /** Make every sleeping task whose time has come a reservation candidate. */
+     #wakeDue() {
++        const { at, aborted } = this.#earliestSleep();
++        if (!aborted && (at === undefined || at > this.#now()))
++            return;
+         for (const id of this.#sleeping) {
+             const record = this.#live.get(id);
+             if (record !== undefined && !this.#notDue(record))
+@@ -1774,6 +1812,8 @@ export class TaskScheduler {
                  for (const record of plan.ready) {
                      const id = record.id;
                      const mode = record.abortRequested ? "abort" : "run";
@@ -280,7 +360,7 @@ index df651a4f8f0769d10daee02292ea91380b158d5e..9096ca6c2b59a1cad3a1d61ae8819c76
                      // Work cut off `restartLimit` times in a row would run forever: an abort handler, or a phase of a kind that
                      // does not end itself at the limit, ends the task `faulted` instead.
                      // The settings are read only for a task that was cut off at all.
-@@ -2002,7 +2013,7 @@ export class TaskScheduler {
+@@ -2002,7 +2042,7 @@ export class TaskScheduler {
          const tasks = [];
          for (const record of this.#live.values())
              tasks.push({ record, state: this.#inspectTask(record, snapshot) });
@@ -289,7 +369,7 @@ index df651a4f8f0769d10daee02292ea91380b158d5e..9096ca6c2b59a1cad3a1d61ae8819c76
          return { scheduling, tasks };
      }
      #inspectTask(record, snapshot) {
-@@ -2180,6 +2191,11 @@ export class TaskScheduler {
+@@ -2180,6 +2220,11 @@ export class TaskScheduler {
       * invocation continues.
       */
      #progress(tx, current, state, extension, context) {
