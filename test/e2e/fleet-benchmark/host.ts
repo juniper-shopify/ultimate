@@ -149,6 +149,7 @@ process.on(
         }, context)
         result = { tasks: Object.keys(tasks().tasks).length }
       } else if (message.command === 'measure') {
+        if (globalThis.fleetProfile) await globalThis.fleetProfile.begin()
         cpu = process.threadCpuUsage()
         at = performance.now()
         meter = setInterval(sample, 1000)
@@ -156,6 +157,7 @@ process.on(
       } else if (message.command === 'stop') {
         clearInterval(meter)
         sample()
+        if (globalThis.fleetProfile) await globalThis.fleetProfile.end()
         await Promise.all(
           active.map(async (id) => (await app.harness.conversation(id, context))!.abort(context)),
         )
