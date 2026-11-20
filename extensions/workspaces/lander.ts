@@ -15,7 +15,7 @@ import type { Context } from '@earendil-works/chord/context'
 import { withAbortSignal } from '@earendil-works/chord/context'
 import { defineTask, ROOT_CONVERSATION_ID } from '@earendil-works/pi-durable'
 import { debounce, deadline } from '../../lib/timers.ts'
-import { git } from '../../lib/git.ts'
+import { git as gitCommand } from '../../lib/git.ts'
 import { overshadowed, retriedLater, settled } from '../../lib/errors.ts'
 import { needsRestart as restartNeeded } from '../../lib/layers.ts'
 import { runGroup, sweepPidFiles } from '../../lib/process-group.ts'
@@ -27,6 +27,36 @@ import { addCheckout, treePath } from './tree.ts'
 import type { Landed, LanderEntry, LanderOutcome, QueueEntry, WorkspaceIndex } from './types.ts'
 import { LanderLog } from './entries.ts'
 import { LanderReportEntry } from './refs.ts'
+
+const conflictReportBytes = 4096
+const mergeOutputBytes = 64 * 1024 * 1024
+const utf8Prefix = (text: string, limit: number) => {
+  const bytes = Buffer.from(text)
+  let end = Math.min(limit, bytes.length)
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--
+  return bytes.subarray(0, end).toString('utf8')
+}
+export const conflictSample = (output: string) => {
+  const paths = lines(output)
+  if (paths.length <= 200 && Buffer.byteLength(output) <= conflictReportBytes) return output
+  const marker = `\n… ${paths.length} conflicting paths; showing a bounded sample.`
+  return (
+    utf8Prefix(paths.slice(0, 200).join('\n'), conflictReportBytes - Buffer.byteLength(marker)) +
+    marker
+  )
+}
+const git = async (source: Parameters<typeof gitCommand>[0], ...args: string[]) => {
+  const options = typeof source === 'string' ? { cwd: source } : source
+  const output = await gitCommand(
+    args[0] === 'merge'
+      ? { ...options, maxBuffer: Math.max(options.maxBuffer ?? 0, mergeOutputBytes) }
+      : source,
+    ...args,
+  )
+  return args[0] === 'diff' && args.includes('--name-only') && args.includes('--diff-filter=U')
+    ? conflictSample(output)
+    : output
+}
 
 const recentSubmitCardOutcomeLimit = 50
 export async function landerPath(home: string, source: string, settings: JsonObject) {
@@ -290,14 +320,62 @@ type CheckedIntegration = {
   integrated: string
   flaky: string[]
 }
-const landedOutcome = (landed: Landed): LanderOutcome => ({
+type LandingRecord = Landed & {
+  commitCount?: number
+  pathCount?: number
+  note?: string
+}
+type LandingOutcome = LanderOutcome & Pick<LandingRecord, 'commitCount' | 'pathCount' | 'note'>
+export async function landingRecord(
+  source: string,
+  base: string,
+  sha: string,
+  flaky: string[],
+  signal: AbortSignal,
+): Promise<LandingRecord> {
+  try {
+    const options = { cwd: source, signal, timeout: 120000 }
+    const [commits, count, changed] = await Promise.all([
+      git(options, 'log', '--oneline', '-n', '50', `${base}..${sha}`),
+      git(options, 'rev-list', '--count', `${base}..${sha}`),
+      git({ ...options, maxBuffer: 64 * 1024 * 1024 }, 'diff', '--name-only', base, sha),
+    ])
+    const paths = lines(changed)
+    const sample = paths.slice(0, 200)
+    const restartPath = paths.find((path) => restartNeeded([path]))
+    if (restartPath && !restartNeeded(sample)) sample[sample.length - 1] = restartPath
+    return {
+      sha,
+      base,
+      commits: lines(commits),
+      commitCount: Number(count),
+      paths: sample,
+      pathCount: paths.length,
+      flaky,
+    }
+  } catch (error) {
+    signal.throwIfAborted()
+    return {
+      sha,
+      base,
+      commits: [`${sha.slice(0, 7)} Integration merge`],
+      paths: [],
+      flaky,
+      note: `Commit/path lists unavailable: ${failure(error)}\nRestart requirement unknown: audit server/, shared/, patches/ and pnpm-lock.yaml when updating Ultimate.`,
+    }
+  }
+}
+const landedOutcome = (landed: LandingRecord): LandingOutcome => ({
   outcome: 'landed',
   sha: landed.sha,
   base: landed.base,
-  commits: landed.commits,
-  paths: landed.paths,
+  commits: landed.commits.slice(0, 50),
+  paths: landed.paths.slice(0, 200),
   flaky: landed.flaky,
   ...(landed.weight ? { weight: landed.weight } : {}),
+  commitCount: landed.commitCount ?? landed.commits.length,
+  pathCount: landed.pathCount ?? landed.paths.length,
+  ...(landed.note ? { note: landed.note } : {}),
 })
 type CommittedDeliveryDecision = {
   phase: 'deliver'
@@ -431,7 +509,7 @@ export function createLander(
                 ms: Math.round(ran.ms),
               })
           }, context)
-        const commitLandingOutcome = (text: string, outcome: LanderOutcome, sha = outcome.sha) =>
+        const commitLandingOutcome = (text: string, outcome: LandingOutcome, sha = outcome.sha) =>
           runtime.commit(async (tx) => {
             const draft = await tx.doc(Workspaces, ROOT_CONVERSATION_ID)
             const steps = draft.queue.find((item) => item.id === id)!.steps
@@ -478,7 +556,7 @@ export function createLander(
                 ...(subject.summary ? { summary: subject.summary } : {}),
                 ...(subject.feature ? { feature: subject.feature } : {}),
                 commits: commits.slice(0, 10),
-                commitCount: commits.length,
+                commitCount: outcome.commitCount ?? commits.length,
                 paths: (outcome.paths ?? []).slice(0, 8),
                 ...(outcome.pushed ? { pushed: outcome.pushed } : {}),
               })
@@ -495,12 +573,20 @@ export function createLander(
               },
             }
           }, context)
-        const summary = (landed: Landed, sha: string, how = '') =>
+        const summary = (landed: LandingRecord, sha: string, how = '') =>
           [
             landed.commits.length
               ? `landed${how} as ${sha.slice(0, 7)} on ${entry.target}.`
               : `had nothing new to land on ${entry.target}.`,
-            ...(landed.commits.length ? [`Commits:\n${landed.commits.join('\n')}`] : []),
+            ...(landed.commits.length
+              ? [`Commits:\n${landed.commits.slice(0, 50).join('\n')}`]
+              : []),
+            ...((landed.commitCount ?? landed.commits.length) > Math.min(50, landed.commits.length)
+              ? [
+                  `… and ${(landed.commitCount ?? landed.commits.length) - Math.min(50, landed.commits.length)} more commits`,
+                ]
+              : []),
+            ...(landed.note ? [landed.note] : []),
             ...landed.flaky.map((command) => `Flaky: ${command}`),
           ].join('\n')
         const fail = async (reason: string, output?: string, hint?: string) => {
@@ -563,7 +649,7 @@ export function createLander(
             return { retry: fail(`${settings.push} rejected the push`, failure(error)) }
           }
         }
-        const landedReport = async (settings: Settings, landed: Landed, sha: string) => {
+        const landedReport = async (settings: Settings, landed: LandingRecord, sha: string) => {
           const pushed = await push(settings, sha)
           if (pushed.retry) return pushed.retry
           const needsRestart =
@@ -804,12 +890,8 @@ export function createLander(
             return fail(`${target} kept moving during ${maxTargetMoveAttempts} attempts.`)
           }
           const weight = await landingWeight(source, base, integrated)
-          const firstFastForwardCandidate: Landed = {
-            sha: integrated,
-            base,
-            commits: lines(await git(source, 'log', '--oneline', `${base}..${integrated}`)),
-            paths: lines(await git(source, 'diff', '--name-only', base, integrated)),
-            flaky,
+          const firstFastForwardCandidate: LandingRecord = {
+            ...(await landingRecord(source, base, integrated, flaky, signal)),
             ...(weight ? { weight } : {}),
           }
           let landed = firstFastForwardCandidate
@@ -817,7 +899,7 @@ export function createLander(
             const draft = await tx.doc(Workspaces, ROOT_CONVERSATION_ID)
             const saved = draft.queue.find((item) => item.id === id)!
             saved.landed ??= firstFastForwardCandidate
-            landed = copyJson(saved.landed) as Landed
+            landed = copyJson(saved.landed) as LandingRecord
             draft.items[String(entry.conversationId)].landed = integrated
           }, context)
           return await landedReport(settings, landed, integrated)
