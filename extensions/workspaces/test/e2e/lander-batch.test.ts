@@ -9,7 +9,7 @@ import { context, prepareHarness } from '../../../../server/harness.ts'
 import { Metadata } from '../../../../server/metadata.ts'
 import { eventLog } from '../../../../server/events.ts'
 import { temp, until } from '../../../../test/helpers.ts'
-import { createLander } from '../../lander.ts'
+import { contains, createLander } from '../../lander.ts'
 import { Workspaces } from '../../workspaces.ts'
 
 const cleanup: (() => Promise<void>)[] = []
@@ -17,7 +17,7 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((close) => close()))
 })
 
-async function fixture(conflicting: boolean, recover = false) {
+async function fixture(conflicting: boolean, recover = false, rewind = false) {
   const directory = await temp('ultimate-batch-')
   const source = join(directory, 'source')
   const bare = join(directory, 'remote.git')
@@ -160,6 +160,7 @@ async function fixture(conflicting: boolean, recover = false) {
       union,
       remote: await git(bare, 'rev-parse', 'main'),
     }
+    if (rewind) await git(source, 'reset', '--hard', '-q', before)
     await writeFile(gate, '')
     await opened.harness.commit(async (tx) => {
       const draft = await tx.doc(Workspaces, ROOT_CONVERSATION_ID)
@@ -192,7 +193,7 @@ async function fixture(conflicting: boolean, recover = false) {
       outcome: 'landed',
       pushed: 'origin/main',
     })
-    expect(await git(bare, 'merge-base', '--is-ancestor', entry.tip, 'main')).toBe('')
+    expect(await contains(bare, entry.tip, 'main')).toBe(true)
   }
   const red = index.results[String(submissions[1].id)]
   expect(red.outcome).toBe(recover ? 'landed' : 'failed')
@@ -238,4 +239,13 @@ it('replaces an interrupted batch task without pushing any unchecked prefix', as
   expect(f.pushed).toHaveLength(1)
   expect(f.records).toEqual([`check PASS ${f.pushed[0]}`, `push ${f.pushed[0]}`])
   expect(await git(f.bare, 'rev-list', '--count', '--merges', `${f.before}..main`)).toBe('3')
+})
+
+it('lands each member again when its interrupted batch push was rewound off the target', async () => {
+  const f = await fixture(false, true, true)
+  expect(f.interrupted!.remote).toBe(f.before)
+  for (const landed of f.interrupted!.landings)
+    expect(landed).toMatchObject({ pushSha: f.interrupted!.union })
+  expect(f.pushed).toHaveLength(3)
+  expect(f.pushed).not.toContain(f.interrupted!.union)
 })

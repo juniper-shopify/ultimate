@@ -1067,6 +1067,9 @@ export function createLander(
             ...(weight ? { weight } : {}),
           }
           let landed = firstFastForwardCandidate
+          const earlierPush = landingFromEarlierTask?.pushSha
+          const integratedHoldsEarlierPush =
+            earlierPush !== undefined && (await contains(source, earlierPush, integrated))
           await runtime.commit(async (tx) => {
             const draft = await tx.doc(Workspaces, ROOT_CONVERSATION_ID)
             const saved = draft.queue.find((item) => item.id === id)!
@@ -1080,6 +1083,9 @@ export function createLander(
                 const record: LandingRecord | undefined = item.landed
                 if (item.source !== source || !record?.pushSha || record.pushSha !== previousPush)
                   continue
+                const siblingKeepsItsOwnRecovery =
+                  item.id !== id && (previousPush !== earlierPush || !integratedHoldsEarlierPush)
+                if (siblingKeepsItsOwnRecovery) continue
                 record.pushSha = integrated
                 if (required !== undefined)
                   record.restartRequired = record.restartRequired || required
