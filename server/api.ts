@@ -97,6 +97,11 @@ const subscriptionPath = /^\/api\/events\/([0-9a-f-]+)\/(\d+)$/
 const maxResentSummaryTitleCharacters = 200
 const taskGraphBroadcastIntervalMs = 100
 const liveViewMinimumEntries = 150
+function busyConversations(graph: TaskGraph) {
+  const busy = new Set<ConversationId>()
+  for (const task of Object.values(graph.tasks)) if (!task.background) busy.add(task.conversationId)
+  return busy
+}
 type StreamUniqueSubscriptionId = number
 
 interface Connection {
@@ -255,13 +260,9 @@ export async function createApi(
       })
     }
     const summariesIncludingConcurrentUpdates = ids ? [...summaries] : []
+    const busy = busyConversations(tasks())
     for (const fresh of refreshed) {
-      const summary = {
-        ...fresh,
-        busy: Object.values(tasks().tasks).some(
-          (task) => task.conversationId === fresh.id && !task.background,
-        ),
-      }
+      const summary = { ...fresh, busy: busy.has(fresh.id) }
       const index = summariesIncludingConcurrentUpdates.findIndex((item) => item.id === summary.id)
       if (index < 0) summariesIncludingConcurrentUpdates.push(summary)
       else summariesIncludingConcurrentUpdates[index] = summary
@@ -279,12 +280,8 @@ export async function createApi(
     if (graphJson !== lastGraph) {
       lastGraph = graphJson
       events.emit('tasks', tasks())
-      const next = summaries.map((summary) => ({
-        ...summary,
-        busy: Object.values(tasks().tasks).some(
-          (task) => task.conversationId === summary.id && !task.background,
-        ),
-      }))
+      const busy = busyConversations(tasks())
+      const next = summaries.map((summary) => ({ ...summary, busy: busy.has(summary.id) }))
       if (JSON.stringify(next) !== JSON.stringify(summaries)) {
         summaries = next
         events.emit('conversations', summaries)
