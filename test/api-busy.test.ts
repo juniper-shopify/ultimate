@@ -6,6 +6,7 @@ import type { Op } from '@earendil-works/chord/delta'
 import { copyJson } from '@earendil-works/chord/json'
 import { expect, it, vi } from 'vitest'
 import { createApi, Events } from '../server/api.ts'
+import type { ConversationSummary } from '../shared/protocol.ts'
 
 it('keeps initial and broadcast busy flags equal to the foreground-task scan', async () => {
   vi.useFakeTimers()
@@ -37,9 +38,14 @@ it('keeps initial and broadcast busy flags equal to the foreground-task scan', a
     snapshot: async () => undefined,
   }
   const events = new Events()
-  const lists: unknown[] = []
+  const lists: ConversationSummary[][] = []
   events.listeners.add((name, data) => {
-    if (name === 'conversations') lists.push(data)
+    if (name === 'conversations') lists.push(data as ConversationSummary[])
+    if (name === 'conversationsUpsert') {
+      const next = new Map(lists.at(-1)!.map((row) => [row.id, row]))
+      for (const row of data as ConversationSummary[]) next.set(row.id, row)
+      lists.push([...next.values()])
+    }
   })
   const api = await createApi(
     { home } as Parameters<typeof createApi>[0],
