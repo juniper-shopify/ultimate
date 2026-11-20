@@ -1,6 +1,6 @@
 import { ROOT } from '@/sdk'
 import { ChevronRightIcon } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -15,6 +15,7 @@ import {
   Provided,
   Slot,
   useConversationSummary,
+  useConversations,
   useDocOf,
   useNow,
   useStore,
@@ -24,17 +25,12 @@ import {
 } from '@/sdk'
 import {
   ConcludeAction,
-  hiddenConversationIds,
   ResumeAction,
   useConcludedSince,
   useOverview,
 } from '../conversations/ui.tsx'
 import type { WorkspaceConversation as ConversationSummary } from '../workspaces/ui.tsx'
-import {
-  PendingAction,
-  useWorkspaceConversations as useConversations,
-  useWorkspaceIndex,
-} from '../workspaces/ui.tsx'
+import { PendingAction, useWorkspaceIndex } from '../workspaces/ui.tsx'
 import { Row, ChildRow, EpicLine, StandingRow, SubagentLine, WaitLines } from './rows.tsx'
 import { waitedOn } from '../../lib/waits.ts'
 import {
@@ -61,36 +57,10 @@ import { LanderState } from './lander.tsx'
 import { StandingPhase, WaitingOnUser } from './ultimate.tsx'
 import { useShell, useSidebarState } from './state.tsx'
 import { topLevelRows } from './listed.ts'
+import { newestInputFirst, sidebarForest, withoutListedSource } from './forest.ts'
 import { UnderUltimate, Unlisted } from './ui.tsx'
 
 const useShownId = () => useStore((state) => state.view?.conversation.id ?? state.requested)
-
-function topOf(id: number | undefined, conversations: readonly ConversationSummary[]) {
-  let current = conversations.find((conversation) => conversation.id === id)
-  while (current?.parentConversationId !== undefined) {
-    const parent = current.parentConversationId
-    current = conversations.find((conversation) => conversation.id === parent)
-  }
-  return current
-}
-
-function workingByTop(conversations: readonly ConversationSummary[]) {
-  const working = new Map<number, 'self' | 'subagents'>()
-  for (const conversation of conversations) {
-    if (
-      !conversation.busy ||
-      (conversation.parentConversationId !== undefined && conversation.ownerTaskId === undefined)
-    )
-      continue
-    const top = topOf(conversation.id, conversations)
-    if (!top) continue
-    working.set(top.id, top.id === conversation.id ? 'self' : (working.get(top.id) ?? 'subagents'))
-  }
-  return working
-}
-
-const newestInputFirst = (a: ConversationSummary, b: ConversationSummary) =>
-  (b.inputAt ?? 0) - (a.inputAt ?? 0) || b.id - a.id
 
 const neverConcludedStandingAgent = (conversation: ConversationSummary) =>
   conversation.label === 'lander' ||
@@ -128,18 +98,29 @@ function Tree({
   const overview = useOverview()
   const log = useDocOf(ROOT, MessagesDoc) ?? emptyMessages
   const tasks = useTasks()
-  const foregroundTaskConversations = new Set<number>(
-    Object.values(tasks?.tasks ?? {})
-      .filter((task) => !task.background)
-      .map((task) => task.conversationId),
+  const list = useConversations()
+  const workspaceIndex = useWorkspaceIndex()
+  const foregroundTaskConversations = useMemo(
+    () =>
+      new Set<number>(
+        Object.values(tasks?.tasks ?? {})
+          .filter((task) => !task.background)
+          .map((task) => task.conversationId),
+      ),
+    [tasks],
   )
-  const conversations = useConversations().map((conversation) => ({
-    ...conversation,
-    busy:
-      !parked.has(conversation.id) &&
-      (foregroundTaskConversations.has(conversation.id) ||
-        overview[conversation.id]?.runState === 'working'),
-  }))
+  const conversations = useMemo(
+    () =>
+      list.map((conversation) => ({
+        ...conversation,
+        workspace: workspaceIndex.items[String(conversation.id)],
+        busy:
+          !parked.has(conversation.id) &&
+          (foregroundTaskConversations.has(conversation.id) ||
+            overview[conversation.id]?.runState === 'working'),
+      })),
+    [list, workspaceIndex.items, parked, foregroundTaskConversations, overview],
+  )
   const actions = useShell()
   const workspacesEnabled = useSystem()?.extensions.some(
     (extension) => extension.name === 'workspaces' && extension.enabled,
@@ -150,9 +131,12 @@ function Tree({
   const [concludedIds] = useSidebarState<number[]>('concluded', [])
   const concludedSince = useConcludedSince()
   const [seen] = useSidebarState<Record<string, number>>('seen', {})
-  const shownTop = topOf(shownId, conversations)
-  const hiddenIds = hiddenConversationIds(conversations, concludedIds)
-  const roots = new Set(useRoots())
+  const rootIds = useRoots()
+  const roots = useMemo(() => new Set(rootIds), [rootIds])
+  const forest = useMemo(() => sidebarForest(conversations, roots), [conversations, roots])
+  const { byId, childrenByParent, branchesBySource, working } = forest
+  const shownTop = shownId === undefined ? undefined : forest.tops.get(shownId)
+  const hiddenIds = useMemo(() => forest.hiddenIds(concludedIds), [forest, concludedIds])
   const summary =
     shownTop &&
     !neverConcludedStandingAgent(shownTop) &&
@@ -161,8 +145,10 @@ function Tree({
       ? overview[shownTop.id]
       : undefined
   const [expanded, setExpanded] = useSidebarState<number[]>('expanded', [])
-  const working = workingByTop(conversations)
-  const topLevel = topLevelRows(conversations, new Set(unlisted.flatMap((set) => [...set])))
+  const topLevel = useMemo(
+    () => topLevelRows(conversations, new Set(unlisted.flatMap((set) => [...set]))),
+    [conversations, unlisted],
+  )
   const standingIds = useDocOf(ROOT, StandingDoc)
   const ultimateId = standingIds?.ultimate
   const timers = timerWaits(useAutomations(5000).data, standingIds)
@@ -185,54 +171,61 @@ function Tree({
   const labelOf = (conversation: Parameters<typeof conversationWait>[0]) =>
     waitLabel(conversationWait(conversation, log, timers), ultimateId, primaryWait, remote.data)
   const ultimate = topLevel.find((conversation) => conversation.id === ultimateId)
-  const agents = topLevel
-    .filter(
-      (conversation) => neverConcludedStandingAgent(conversation) && conversation.id !== ultimateId,
-    )
-    .toSorted((a, b) => Number(b.label === 'lander') - Number(a.label === 'lander') || a.id - b.id)
-  const workspaceIndex = useWorkspaceIndex()
-  const listed = topLevel
-    .filter(
-      (conversation) =>
-        !neverConcludedStandingAgent(conversation) && !hiddenIds.has(conversation.id),
-    )
-    .toSorted(newestInputFirst)
-  const hidden = topLevel
-    .filter(
-      (conversation) =>
-        !neverConcludedStandingAgent(conversation) && hiddenIds.has(conversation.id),
-    )
-    .toSorted(newestInputFirst)
-  const branchesBySource = new Map<number, ConversationSummary[]>()
-  for (const conversation of topLevel.toSorted(newestInputFirst)) {
-    if (roots.has(conversation.id) || !conversation.branchOf) continue
-    const source = conversation.branchOf.conversationId
-    branchesBySource.set(source, [...(branchesBySource.get(source) ?? []), conversation])
-  }
-  const rootRows = listed
-    .filter((conversation) => roots.has(conversation.id))
-    .toSorted(newestInputFirst)
-  const landings = useLandings(rootRows.map((root) => root.id))
-  const branchesBelow = (id: number): ConversationSummary[] =>
-    (branchesBySource.get(id) ?? [])
-      .filter((branch) => !hiddenIds.has(branch.id))
-      .flatMap((branch) => [branch, ...branchesBelow(branch.id)])
-  const openBranches = rootRows
-    .flatMap((root) => branchesBelow(root.id))
-    .filter(
-      (branch) =>
-        inFlight(branch, workspaceIndex) &&
-        stillOpen({ conversation: branch, working: working.has(branch.id) }, landings),
-    )
-    .toSorted(newestInputFirst)
-  const rest = listed.filter(
-    (conversation) =>
-      !roots.has(conversation.id) &&
-      !neverConcludedStandingAgent(conversation) &&
-      !openBranches.includes(conversation),
+  const agents = useMemo(
+    () =>
+      topLevel
+        .filter(
+          (conversation) =>
+            neverConcludedStandingAgent(conversation) && conversation.id !== ultimateId,
+        )
+        .toSorted(
+          (a, b) => Number(b.label === 'lander') - Number(a.label === 'lander') || a.id - b.id,
+        ),
+    [topLevel, ultimateId],
   )
-  const earlier = rest.filter(
-    (conversation) => !rest.some((source) => source.id === conversation.branchOf?.conversationId),
+  const { listed, hidden, topLevelIds, rootRows } = useMemo(() => {
+    const sorted = topLevel
+      .filter((conversation) => !neverConcludedStandingAgent(conversation))
+      .toSorted(newestInputFirst)
+    const visible = sorted.filter((conversation) => !hiddenIds.has(conversation.id))
+    return {
+      listed: visible,
+      hidden: sorted.filter((conversation) => hiddenIds.has(conversation.id)),
+      topLevelIds: new Set(topLevel.map((conversation) => conversation.id)),
+      rootRows: visible.filter((conversation) => roots.has(conversation.id)),
+    }
+  }, [topLevel, hiddenIds, roots])
+  const landings = useLandings(rootRows.map((root) => root.id))
+  const openBranches = useMemo(() => {
+    const branchesBelow = (id: number): ConversationSummary[] =>
+      (branchesBySource.get(id) ?? [])
+        .filter((branch) => topLevelIds.has(branch.id) && !hiddenIds.has(branch.id))
+        .flatMap((branch) => [branch, ...branchesBelow(branch.id)])
+    return rootRows
+      .flatMap((root) => branchesBelow(root.id))
+      .filter(
+        (branch) =>
+          inFlight(branch, workspaceIndex) &&
+          stillOpen({ conversation: branch, working: working.has(branch.id) }, landings),
+      )
+      .toSorted(newestInputFirst)
+  }, [branchesBySource, topLevelIds, hiddenIds, rootRows, workspaceIndex, working, landings])
+  const openBranchIds = useMemo(
+    () => new Set(openBranches.map((branch) => branch.id)),
+    [openBranches],
+  )
+  const earlier = useMemo(
+    () =>
+      withoutListedSource(
+        listed.filter(
+          (conversation) => !roots.has(conversation.id) && !openBranchIds.has(conversation.id),
+        ),
+      ),
+    [listed, roots, openBranchIds],
+  )
+  const hiddenRoots = useMemo(
+    () => new Set(withoutListedSource(hidden).map((conversation) => conversation.id)),
+    [hidden],
   )
 
   const [warning, setWarning] = useState<{
@@ -247,9 +240,9 @@ function Tree({
   const setConclude = async (id: number, conclude: boolean) => {
     if (conclude) await api.action(ConcludeAction, { ids: [id] })
     else await api.action(ResumeAction, { ids: [id] })
-    if (!conclude || !hiddenConversationIds(conversations, [id]).has(shownTop?.id ?? -1)) return
+    if (!conclude || !forest.hiddenIds([id]).has(shownTop?.id ?? -1)) return
     const index = listed.findIndex((conversation) => conversation.id === id)
-    const subtree = hiddenConversationIds(conversations, [id])
+    const subtree = forest.hiddenIds([id])
     const next =
       listed.slice(index + 1).find((candidate) => !subtree.has(candidate.id)) ??
       listed.find((candidate) => !subtree.has(candidate.id))
@@ -308,7 +301,7 @@ function Tree({
       conversationWait(facts, log, timers)?.on === 'agent'
         ? waitedOn(facts.id, log.messages).map((id) => ({
             id,
-            title: conversations.find((c) => c.id === id)?.title,
+            title: byId.get(id)?.title,
             feature: overview[id]?.feature,
           }))
         : []
@@ -419,14 +412,6 @@ function Tree({
     )
   }
 
-  const childrenByParent = new Map<number, ConversationSummary[]>()
-  for (const candidate of conversations) {
-    const parent = candidate.parentConversationId
-    if (candidate.ownerTaskId === undefined || parent === undefined) continue
-    const children = childrenByParent.get(parent) ?? []
-    children.push(candidate)
-    childrenByParent.set(parent, children)
-  }
   const tree = (conversation: ConversationSummary, nested = false, concluded = false) => {
     const tallyHasOnlyHistoricalOwnedChildren = roots.has(conversation.id)
     const children = tallyHasOnlyHistoricalOwnedChildren
@@ -437,7 +422,10 @@ function Tree({
       roots.has(conversation.id) && !concluded
         ? []
         : (branchesBySource.get(conversation.id) ?? []).filter(
-            (branch) => hiddenIds.has(branch.id) === concluded && !openBranches.includes(branch),
+            (branch) =>
+              topLevelIds.has(branch.id) &&
+              hiddenIds.has(branch.id) === concluded &&
+              !openBranchIds.has(branch.id),
           )
     const subagents = children.length > 0 && (
       <Collapsible
@@ -664,8 +652,7 @@ function Tree({
                 hidden
                   .filter(
                     (conversation) =>
-                      roots.has(conversation.id) ||
-                      !hidden.some((source) => source.id === conversation.branchOf?.conversationId),
+                      roots.has(conversation.id) || hiddenRoots.has(conversation.id),
                   )
                   .map((conversation) => tree(conversation, false, true))}
             </CollapsibleContent>
