@@ -135,7 +135,8 @@ summary and the root conversation's documents, and in a matching transcript each
 between inputs, messages and answers folds into one quiet "worked · N steps" row that expands to the usual rendering.
 Calls the listed `tools` keep stay visible and split the run: a tool name, or a test `(call, docs) => boolean` of a
 call; `docs` lists the kinds of the root conversation's documents `when` and the tests read, which the transcript
-follows and passes to them by kind. The tools of every matching facet combine. Renderers check `useCompact()`, that
+follows and passes to them by kind. Only those declared kinds are passed; unrelated root document updates do not
+invalidate compact grouping. The tools of every matching facet combine. Renderers check `useCompact()`, that
 test for the shown conversation or `undefined`, to adapt to it. Messages turns it on for @ultimate's conversation, found
 by the standing agents' index (`StandingDoc`) rather than its title, keeping messages, branch starts,
 workspace outcomes and scripts its log says messaged you, and shows its messages to you as bubbles. Revealing an entry
