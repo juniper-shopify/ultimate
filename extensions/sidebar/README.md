@@ -71,9 +71,11 @@ section of the `sidebar.top` slot draws the same heading. Top to bottom:
   a landed branch that gets new work is open again). Each shows its title, its feature tag, a state (`submitted` or
   `landing` while the lander has it, the working phase while it works, brand-colored `waits on <target>` for an
   agent, remote, timer or starter dependency, amber `waits on you`, red `failed`, else `idle`) and its age; clicking opens it, and its `…` menu is the same as an Earlier row's (Rename, Compact
-  context, Conclude with the pending-work check). A branch
-  retains its formatted age until its latest timestamp or the sidebar's minute clock changes; unrelated status updates
-  do not reformat it. A branch with a worktree also shows its work so far on a quiet line below (workspaces' `progress`): `N commits` not yet on
+  context, Conclude with the pending-work check). Shared branch status is derived once for the list; an unchanged
+  row header skips unrelated status renders. Starter documents remain row-scoped, and a phase provider mounts only
+  inside a working label, so status transitions do not remount editing controls. A branch retains its formatted age
+  until its latest timestamp or the sidebar's minute clock changes; unrelated status updates do not reformat it.
+  A branch with a worktree also shows its work so far on a quiet line below (workspaces' `progress`): `N commits` not yet on
   its target, opening `branch:<name>` in Review, and `+ N edits` (uncommitted changed paths), opening
   `uncommitted:<id>`. A fresh worktree, or a branch without one, shows nothing. All rows are read in one call, again
   only when an agent commits (`coding-tools.committed`), a worktree's state changes or a branch's run starts or ends;
