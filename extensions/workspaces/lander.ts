@@ -471,11 +471,12 @@ export function createLander(
   },
   limits: CheckLimits = defaultCheckLimitsSeconds,
 ) {
-  async function resetTrackedIntegration(source: string, tip: string) {
+  async function resetTrackedIntegration(source: string, tip: string, signal: AbortSignal) {
     const path = await landerCheckout(host.home, source, await host.projectSettings(), tip)
-    await git(path, 'reset', '--hard', '-q')
-    await git(path, 'checkout', '-q', '--detach', '--force', tip)
-    await git(path, 'clean', '-fdq')
+    const options = { cwd: path, signal, timeout: 300000 }
+    await git(options, 'reset', '--hard', '-q')
+    await git(options, 'checkout', '-q', '--detach', '--force', tip)
+    await git(options, 'clean', '-fdq')
     return path
   }
 
@@ -725,6 +726,7 @@ export function createLander(
             const path = await resetTrackedIntegration(
               source,
               mergedBeforeChecks?.sha ?? (await git(source, 'rev-parse', `refs/heads/${target}`)),
+              signal,
             )
             if (!mergedBeforeChecks) {
               await step('preparing')
@@ -736,12 +738,29 @@ export function createLander(
                 hint: string,
               ) => {
                 try {
-                  await git(path, 'merge', '--no-edit', '-m', message, commit)
+                  await remote(
+                    path,
+                    signal,
+                    'merge',
+                    '--no-edit',
+                    '--no-stat',
+                    '-q',
+                    '-m',
+                    message,
+                    commit,
+                  )
                   return false
-                } catch {
-                  const conflicts = await git(path, 'diff', '--name-only', '--diff-filter=U')
-                  await git(path, 'merge', '--abort').catch(overshadowed)
-                  await fail(reason, conflicts, hint)
+                } catch (error) {
+                  if (signal.aborted) throw error
+                  const conflicts = await git(
+                    { cwd: path, signal, timeout: 120000, maxBuffer: 64 * 1024 * 1024 },
+                    'diff',
+                    '--name-only',
+                    '--diff-filter=U',
+                  )
+                  await remote(path, signal, 'merge', '--abort').catch(overshadowed)
+                  if (conflicts) await fail(reason, conflicts, hint)
+                  else await fail('the merge failed', failure(error))
                   return true
                 }
               }
@@ -904,7 +923,13 @@ export function createLander(
                 .find((record) => record.includes(`branch refs/heads/${target}`))?.[0]
                 .slice('worktree '.length)
               if (checkoutHoldingTargetBranch)
-                await git(checkoutHoldingTargetBranch, 'merge', '-q', '--ff-only', integrated)
+                await git(
+                  { cwd: checkoutHoldingTargetBranch, timeout: 600000 },
+                  'merge',
+                  '-q',
+                  '--ff-only',
+                  integrated,
+                )
               else await git(source, 'update-ref', `refs/heads/${target}`, integrated, base)
             } catch (error) {
               refused = failure(error)
