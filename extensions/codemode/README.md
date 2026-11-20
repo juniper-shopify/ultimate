@@ -63,7 +63,7 @@ Facets can export `userActions: string[]` to reserve actions for the UI. `ultima
 `<extension>/<action> is a user-only action`; use the UI for project trust, secret changes, and provider login/logout.
 Normal actions remain callable. This dispatch restriction is not a sandbox against arbitrary agent code.
 
-History entries and searches yield between pages or cooperative work slices so timers and I/O can run; one synchronous page read or record cannot be interrupted. On a busy host a store-wide search can exceed the sandbox's 60-second default timeout even if it previously finished while blocking the event loop.
+History entries and searches yield between pages or cooperative work slices so timers and I/O can run; one synchronous page read or record cannot be interrupted. On a busy host a store-wide search can exceed the sandbox's 60-second default timeout even if it previously finished while blocking the event loop. Entries and searches observe their call's abort signal at cooperative yield points, including closed chapters, so cancellation or timeout stops the remaining scan; calls without a signal continue as before.
 
 Entry/search limits default to 100 and must be 1–1000. Pagination of raw entries uses the oldest returned entry ID as `before`. Other writes go through normal tools. Action side effects, like nested tool side effects, are not rolled back if the script fails or yields.
 
