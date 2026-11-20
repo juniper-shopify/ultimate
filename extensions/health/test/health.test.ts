@@ -6,14 +6,36 @@ import healthExtension, { announce, responseEntry } from '../server.ts'
 import { HealthApi } from '../api.ts'
 import { actions as models } from '../../models/server.ts'
 import type { ActionContext } from '../../../server/actions.ts'
-import { failureKind, healthPath, merge, readHealth, record, sanitize, state } from '../store.ts'
+import {
+  failureKind,
+  healthPath,
+  healthRecorder,
+  merge,
+  readHealth,
+  sanitize,
+  state,
+} from '../store.ts'
+import type { HealthEntry } from '../store.ts'
 import type { ExtensionHost } from '../../../server/extensions.ts'
 import { prepareHarness } from '../../../server/harness.ts'
 import { LoginChanged } from '../../models/api.ts'
 import { Changed as HealthChanged } from '../refs.ts'
 import { apis, eventHost, removeTemps, temp, until } from '../../../test/helpers.ts'
 
-afterEach(removeTemps)
+const recorders = new Map<string, ReturnType<typeof healthRecorder>>()
+function record(home: string, provider: string, entry: HealthEntry) {
+  let recorder = recorders.get(home)
+  if (!recorder) {
+    recorder = healthRecorder(home)
+    recorders.set(home, recorder)
+  }
+  return recorder.record(provider, entry)
+}
+afterEach(async () => {
+  await Promise.all([...recorders.values()].map((recorder) => recorder.close()))
+  recorders.clear()
+  await removeTemps()
+})
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -205,6 +227,7 @@ it('reads only providers with a login here, so a removed login leaves no stale f
       getProviderAuthStatus: (provider: string) => ({ configured: provider === 'openai-codex' }),
     },
     react: () => {},
+    onClose: () => {},
   } as unknown as ExtensionHost)
   const providers = await services.need(HealthApi).providers()
   expect(providers.map((entry) => [entry.provider, entry.state])).toEqual([['openai-codex', 'ok']])
@@ -231,6 +254,7 @@ it("Ultimate's logout resets the provider's health through models.login-changed"
       harness: () => opened.harness,
       emit: events.emit,
       react: events.react,
+      onClose: () => {},
       modelRuntime: { logout: async (provider: string) => void logouts.push(provider) },
     } as unknown as ExtensionHost
     healthExtension(host)
