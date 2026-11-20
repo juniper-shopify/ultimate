@@ -1,5 +1,5 @@
 import { offsetEntryId } from '../../lib/ids.ts'
-import type { ConversationId, Cursor } from '@earendil-works/pi-durable'
+import type { ConversationId, Cursor, EntryRecord } from '@earendil-works/pi-durable'
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context'
 import { onCommit } from '../../lib/commits.ts'
 import { AgentDoc } from '@earendil-works/pi-durable'
@@ -12,6 +12,7 @@ import {
 import type { ExtensionHost } from '../../server/extensions.ts'
 import { ContextUsageDoc } from './api.ts'
 import { rebuiltOnOpen } from '../../lib/errors.ts'
+import { isInput } from '../../lib/entries.ts'
 
 export function contextBehavior(
   host: Pick<ExtensionHost, 'harness' | 'onOpen' | 'onClose' | 'notice'> & {
@@ -23,13 +24,19 @@ export function contextBehavior(
   let backgroundSerialBackfill: Promise<void> | undefined
   const pending = new Map<ConversationId, Promise<void>>()
 
-  const reconcile = async (id: ConversationId) => {
+  const reconcile = async (
+    id: ConversationId,
+    assistant?: EntryRecord,
+    currentJob?: () => boolean,
+  ) => {
     if (closed) return
     const harness = host.harness()
     const conversation = await harness.conversation(id, context)
     if (!conversation) return
-    const view = await conversation.context(context)
-    const ownRequestEntries = view.entries.filter((entry) => entry.conversationId === id)
+    const view = assistant ? undefined : await conversation.context(context)
+    const ownRequestEntries = assistant
+      ? [assistant]
+      : view!.entries.filter((entry) => entry.conversationId === id)
     const latest = ownRequestEntries.reduce(
       (at, entry) =>
         entry.kind === 'pi.assistant' || entry.kind === 'pi.compaction' || entry.kind === 'pi.reset'
@@ -41,7 +48,7 @@ export function contextBehavior(
     const saved = await harness.snapshot(ContextUsageDoc, id, context)
     const current = saved?.entry === latest && saved.at !== 0
     let tokens = current ? saved.tokens : source.message ? promptTokens(source.message.usage) : 0
-    if (!current && source.stale && view.head) {
+    if (!current && source.stale && view?.head) {
       const before = (
         await conversation.entries(
           { maxEntryId: offsetEntryId(view.head.id, -1) },
@@ -60,6 +67,7 @@ export function contextBehavior(
       if (closed) return
       const record = await tx.conversation(id)
       const previous = await tx.doc(ContextUsageDoc, id)
+      if (assistant && (!currentJob?.() || latest <= (previous.entry ?? 0))) return
       if (record?.parent && latest === 0 && previous.at === 0) return
       const { model } = await tx.doc(AgentDoc, id)
       const window = model
@@ -70,7 +78,7 @@ export function contextBehavior(
         : source.message
           ? source.message.timestamp
           : source.stale
-            ? (view.head?.model?.[0]?.timestamp ?? Date.now())
+            ? (view?.head?.model?.[0]?.timestamp ?? Date.now())
             : 0
       const next = {
         ...contextUsage(
@@ -93,9 +101,9 @@ export function contextBehavior(
     }, context)
   }
 
-  const schedule = (id: ConversationId) => {
-    const job = (pending.get(id) ?? Promise.resolve())
-      .then(() => reconcile(id))
+  const schedule = (id: ConversationId, assistant?: EntryRecord) => {
+    const job: Promise<void> = (pending.get(id) ?? Promise.resolve())
+      .then(() => reconcile(id, assistant, () => pending.get(id) === job))
       .catch((error: unknown) => {
         if (!closed) host.notice(`Conversation context: ${String(error)}`)
       })
@@ -125,7 +133,34 @@ export function contextBehavior(
           ids.add(change.conversationId)
       }
       for (const id of ids) {
-        rebuiltOnOpen('open reconciles every conversation context', schedule(id))
+        let assistant: EntryRecord | undefined
+        let full = false
+        for (const change of publication.changes) {
+          if (change.type === 'conversation' && change.value.id === id) full = true
+          if (
+            change.type === 'document' &&
+            change.conversationId === id &&
+            change.record.kind === AgentDoc.definition.kind
+          )
+            full = true
+          if (change.type !== 'entry' || change.value.conversationId !== id) continue
+          const entry = change.value
+          if (
+            isInput(entry) ||
+            entry.head !== undefined ||
+            entry.edits !== undefined ||
+            entry.kind === 'pi.compaction' ||
+            entry.kind === 'pi.reset'
+          )
+            full = true
+          if (entry.kind !== 'pi.assistant') continue
+          if (entry.model?.[0]?.role !== 'assistant') full = true
+          else if (!assistant || entry.id > assistant.id) assistant = entry
+        }
+        rebuiltOnOpen(
+          'open reconciles every conversation context',
+          schedule(id, full ? undefined : assistant),
+        )
       }
     })
     backgroundSerialBackfill = (async () => {
