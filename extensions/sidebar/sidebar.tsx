@@ -1,6 +1,6 @@
 import { ROOT } from '@/sdk'
 import { ChevronRightIcon } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -276,6 +276,13 @@ function Tree({
     }
     await setConclude(id, conclude)
   }
+  const concludeRow = useRef(requestConclude)
+  useLayoutEffect(() => {
+    concludeRow.current = requestConclude
+  })
+  const onConcludeRow = useCallback((id: number, value: boolean) => {
+    void concludeRow.current(id, value)
+  }, [])
   const standingRow = (conversation: ConversationSummary | undefined) => {
     const busy = conversation !== undefined && working.has(conversation.id)
     const latest = Math.max(conversation?.inputAt ?? 0, conversation?.answerAt ?? 0)
@@ -384,53 +391,56 @@ function Tree({
           working={working.get(conversation.id)}
         />
       )
-    return (
+    const render = (starter: number | null | undefined) => {
+      const recorded = seen[conversation.id]
+      const facts = {
+        id: conversation.id,
+        kind: 'other' as const,
+        runState: overview[conversation.id]?.runState,
+        busy: underway(conversation.id),
+        parked: parked.has(conversation.id),
+        starter,
+        concludedSince: concludedSince(conversation.id),
+      }
+      const derived = conversationState(facts, log, timers)
+      const wait = labelOf(facts)
+      const workingUnlessQuestionWaitsOnUser =
+        derived === 'waits'
+          ? undefined
+          : (working.get(conversation.id) ?? (derived === 'working' ? 'self' : undefined))
+      return (
+        <Row
+          activity={overview[conversation.id]?.activity}
+          state={derived}
+          waitLabel={derived === 'awaiting' ? wait : undefined}
+          concluded={hiddenIds.has(conversation.id)}
+          conversation={conversation}
+          draft={conversation.inputAt === undefined}
+          feature={overview[conversation.id]?.feature}
+          key={conversation.id}
+          now={now}
+          onConclude={onConcludeRow}
+          shown={shown}
+          unseen={
+            recorded !== undefined &&
+            (conversation.answerAt ?? 0) > recorded &&
+            conversation.id !== shownId &&
+            workingUnlessQuestionWaitsOnUser === undefined
+          }
+          working={workingUnlessQuestionWaitsOnUser}
+        />
+      )
+    }
+    return conversation.branchOf ? (
       <StartedRow
         conversation={conversation}
         concluded={concludedSince(conversation.id) === Infinity}
         key={conversation.id}
       >
-        {(starter) => {
-          const recorded = seen[conversation.id]
-          const facts = {
-            id: conversation.id,
-            kind: 'other' as const,
-            runState: overview[conversation.id]?.runState,
-            busy: underway(conversation.id),
-            parked: parked.has(conversation.id),
-            starter,
-            concludedSince: concludedSince(conversation.id),
-          }
-          const derived = conversationState(facts, log, timers)
-          const wait = labelOf(facts)
-          const workingUnlessQuestionWaitsOnUser =
-            derived === 'waits'
-              ? undefined
-              : (working.get(conversation.id) ?? (derived === 'working' ? 'self' : undefined))
-          return (
-            <Row
-              activity={overview[conversation.id]?.activity}
-              state={derived}
-              waitLabel={derived === 'awaiting' ? wait : undefined}
-              concluded={hiddenIds.has(conversation.id)}
-              conversation={conversation}
-              draft={conversation.inputAt === undefined}
-              feature={overview[conversation.id]?.feature}
-              key={conversation.id}
-              now={now}
-              onConclude={(conclude) => void requestConclude(conversation.id, conclude)}
-              shown={shown}
-              unseen={
-                recorded !== undefined &&
-                (conversation.answerAt ?? 0) > recorded &&
-                conversation.id !== shownId &&
-                workingUnlessQuestionWaitsOnUser === undefined
-              }
-              working={workingUnlessQuestionWaitsOnUser}
-            />
-          )
-        }}
+        {render}
       </StartedRow>
+    ) : (
+      render(undefined)
     )
   }
 
