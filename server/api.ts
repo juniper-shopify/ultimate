@@ -75,6 +75,7 @@ function text(value: unknown, name: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new HttpError(400, `Expected ${name}`)
   return value
 }
+const conversationListBroadcastIntervalMs = 100
 const validUiKey = (key: unknown): key is string =>
   typeof key === 'string' && key.length <= 200 && /^[A-Za-z0-9_.:-]+$/.test(key)
 function uiOps(ops: unknown): UiOp[] {
@@ -221,10 +222,18 @@ export async function createApi(
   let closed = false
   let summaries: ConversationSummary[] = []
   const projectIndex = conversationIndex(host.home)
-  const indexListener: Parameters<typeof events.listeners.add>[0] = (name, data) => {
-    if (name === 'conversations') projectIndex.update(data as ConversationSummary[])
+  let lastConversations = ''
+  const broadcastConversations = batch(conversationListBroadcastIntervalMs, () => {
+    const next = JSON.stringify(summaries)
+    if (next !== lastConversations) {
+      lastConversations = next
+      events.emit('conversations', summaries)
+    }
+  })
+  function scheduleConversations() {
+    projectIndex.update(summaries)
+    if (!closed) broadcastConversations()
   }
-  events.listeners.add(indexListener)
   let refreshing = Promise.resolve()
   async function refreshConversations(ids?: Set<ConversationId>) {
     const records = await harness.commit(async (tx) => {
@@ -275,10 +284,13 @@ export async function createApi(
     }
     if (JSON.stringify(summariesIncludingConcurrentUpdates) !== JSON.stringify(summaries)) {
       summaries = summariesIncludingConcurrentUpdates
-      events.emit('conversations', summaries)
+      scheduleConversations()
     }
   }
   await refreshConversations()
+  broadcastConversations.cancel()
+  lastConversations = JSON.stringify(summaries)
+  if (summaries.length) events.emit('conversations', summaries)
   projectIndex.update(summaries)
   let lastGraph = JSON.stringify(tasks())
   const scheduleGraph = batch(taskGraphBroadcastIntervalMs, () => {
@@ -290,7 +302,7 @@ export async function createApi(
       const next = summaries.map((summary) => ({ ...summary, busy: busy.has(summary.id) }))
       if (JSON.stringify(next) !== JSON.stringify(summaries)) {
         summaries = next
-        events.emit('conversations', summaries)
+        scheduleConversations()
       }
     }
   })
@@ -822,9 +834,9 @@ export async function createApi(
       unsubscribe()
       graph.detach()
       scheduleGraph.cancel()
+      broadcastConversations.cancel()
       await Promise.all([...streams].map((stop) => stop()))
       await refreshing
-      events.listeners.delete(indexListener)
       await projectIndex.flush()
     },
   }
