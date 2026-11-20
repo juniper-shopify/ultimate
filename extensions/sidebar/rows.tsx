@@ -40,6 +40,7 @@ import type { WorkspaceConversation as ConversationSummary } from '../workspaces
 import type { OverviewRow } from '../conversations/types.ts'
 import type { ConversationState } from '../messages/ui.tsx'
 import { SummaryHistory } from './summaries.tsx'
+import { subagentLineHeightRem } from './subagent-window.tsx'
 
 const settled = {
   waits: {
@@ -506,14 +507,14 @@ function TaskedSubagentLine({
     <button
       aria-current={shown ? 'true' : undefined}
       className={cn(
-        'mx-2 flex h-7 w-[calc(100%-1rem)] min-w-0 cursor-pointer items-center gap-1.5 rounded-md pr-2 text-left font-mono text-[10.5px] outline-none hover:bg-sidebar-accent/50 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset',
+        'mx-2 flex w-[calc(100%-1rem)] min-w-0 cursor-pointer items-center gap-1.5 rounded-md pr-2 text-left font-mono text-[10.5px] outline-none hover:bg-sidebar-accent/50 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset',
         shown && 'bg-sidebar-accent',
       )}
       data-child-conversation={conversation.id}
       data-selected={shown || undefined}
       data-ui="sidebar-row"
       onClick={() => actions.switchConversation(conversation.id)}
-      style={{ paddingLeft: 20 + depth * 12 }}
+      style={{ height: `${subagentLineHeightRem}rem`, paddingLeft: 20 + depth * 12 }}
       title={[
         `${conversation.label ?? 'Agent'} · #${conversation.id}`,
         task?.title ?? row?.activity ?? conversation.title,

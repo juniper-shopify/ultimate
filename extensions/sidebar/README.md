@@ -80,7 +80,15 @@ section of the `sidebar.top` slot draws the same heading. Top to bottom:
   `E1 · <title>` comes first (`EpicLine`, `rows.tsx`, from plan's `conversations.epic` point): its dot pulses while
   the coordinator runs, it reads `idle` between runs and `done` with a check once the epic is, and a click opens the
   epic in the plan panel. Its subagents follow, one line each at any depth (`SubagentLine`, `rows.tsx`): their mark, plan
-  chip, role and `#id`, and their state word, with the latest activity or plan task on hover.
+  chip, role and `#id`, and their state word, with the latest activity or plan task on hover. Only the viewport's
+  subagent lines and six rows of overscan on each side mount, with spacers preserving their scroll positions.
+  `SubagentLine` in `rows.tsx` and the spacers share `subagentLineHeightRem` from `subagent-window.tsx` (1.75 rem),
+  so changing the row height also changes the window geometry.
+  The first, last, selected and focused lines remain mounted; forward Tab visits every subagent and its task chip in order.
+  Shift+Tab keeps its existing global shortcut behavior, not backward focus traversal. Selecting a child scrolls it into
+  view once; later row-list changes do not pull a user back to the selection. List items expose their full-set position
+  and count even though browse mode reaches only mounted content. This window applies only to the in-flight subtree,
+  not Earlier, Concluded or their nested expanders.
 
 Landed branches and older conversations that are neither roots nor branches live in the collapsed "Earlier · N" group,
 above "Concluded · N". There, branches nest under their source (`branchOf.conversationId`), with a hairline guide
